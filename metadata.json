@@ -1,0 +1,6 @@
+{
+  "name": "OmniRead",
+  "description": "Advanced Android eBook Reader, Local Audiobook Player, and Hybrid AI TTS Studio",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
