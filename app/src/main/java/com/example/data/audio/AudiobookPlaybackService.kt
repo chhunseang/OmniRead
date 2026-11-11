@@ -41,6 +41,7 @@ import com.example.data.local.dao.ChapterDao
 import com.example.data.local.dao.TtsSyncCueDao
 import com.example.data.local.entity.AudioTrackEntity
 import com.example.data.local.entity.BookEntity
+import com.example.data.local.entity.BookFormat
 import com.example.data.local.entity.BookmarkEntity
 import com.example.data.local.entity.ChapterEntity
 import com.example.data.local.entity.ReadingStatus
@@ -381,7 +382,8 @@ class AudiobookPlayerControllerImpl @Inject constructor(
     private val audioTrackDao: AudioTrackDao,
     private val chapterDao: ChapterDao,
     private val bookmarkDao: BookmarkDao,
-    private val ttsSyncCueDao: TtsSyncCueDao
+    private val ttsSyncCueDao: TtsSyncCueDao,
+    private val appSettings: com.example.data.settings.AppSettingsRepository
 ) : AudiobookPlayerController, SensorEventListener {
 
     private val controllerScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
@@ -398,10 +400,18 @@ class AudiobookPlayerControllerImpl @Inject constructor(
     private var sleepTimerUiJob: Job? = null
     private var bookmarksObserverJob: Job? = null
     private var lastShakeTimestampMs: Long = 0L
+    /** When playback last paused (0 while playing), for rewind-on-resume. */
+    private var pausedAtMs: Long = 0L
 
     init {
         connectToMediaSessionService()
         startProgressAndCueSyncPolling()
+        // Skip buttons follow Settings › Listening
+        controllerScope.launch {
+            appSettings.settings.collect { s ->
+                setCustomSkipIntervals(s.skipForwardSeconds * 1000L, s.skipBackSeconds * 1000L)
+            }
+        }
     }
 
     private fun connectToMediaSessionService() {
@@ -449,6 +459,7 @@ class AudiobookPlayerControllerImpl @Inject constructor(
         player.addListener(object : Player.Listener {
             override fun onIsPlayingChanged(isPlaying: Boolean) {
                 _playbackState.update { it.copy(isPlaying = isPlaying) }
+                pausedAtMs = if (isPlaying) 0L else System.currentTimeMillis()
             }
 
             override fun onPlaybackStateChanged(playbackState: Int) {
@@ -488,27 +499,35 @@ class AudiobookPlayerControllerImpl @Inject constructor(
             }
 
             var chapters = withContext(Dispatchers.IO) { chapterDao.getChaptersForBook(bookId) }
-            if (chapters.isEmpty()) {
-                chapters = tracks.mapIndexed { idx, track ->
-                    ChapterEntity(
-                        id = "${book.id}_ch_$idx",
-                        bookId = book.id,
-                        chapterIndex = idx,
-                        title = track.title,
-                        href = track.fileUri,
-                        audioTrackId = track.id,
-                        startTimeMs = track.startOffsetInBookMs,
-                        endTimeMs = track.startOffsetInBookMs + track.durationMs
-                    )
+            // No chapters yet, or only the one-per-file placeholders: use the chapter markers
+            // stored inside the audio files (.m4b / .m4a), falling back to one chapter per file.
+            val onlyFilePlaceholders = chapters.isNotEmpty() && chapters.size <= tracks.size &&
+                chapters.all { ch -> tracks.any { it.fileUri == ch.href } }
+            if (chapters.isEmpty() || onlyFilePlaceholders) {
+                val fromFiles = withContext(Dispatchers.IO) { EmbeddedChapterReader.chaptersForTracks(context, book.id, tracks) }
+                if (chapters.isEmpty() || fromFiles.size > chapters.size) {
+                    chapters = fromFiles
+                    withContext(Dispatchers.IO) {
+                        chapterDao.deleteChaptersForBook(book.id)
+                        chapterDao.upsertChapters(chapters)
+                        bookDao.upsertBook(book.copy(totalChapters = chapters.size))
+                    }
                 }
-                withContext(Dispatchers.IO) { chapterDao.upsertChapters(chapters) }
             }
 
             observeBookmarksForBook(book.id)
 
-            val initialTrackIdx = (startTrackIndex ?: book.currentAudioTrackIndex)
+            val savedTrackIdx = (startTrackIndex ?: book.currentAudioTrackIndex)
                 .coerceIn(0, max(0, tracks.size - 1))
-            val initialPosMs = (startPositionMs ?: book.currentAudioPositionMs).coerceAtLeast(0L)
+            val savedPosMs = (startPositionMs ?: book.currentAudioPositionMs).coerceAtLeast(0L)
+            // Opening a book you already finished starts it again from the top instead of
+            // landing on its last second (an explicit start position is always honoured)
+            val savedTrack = tracks.getOrNull(savedTrackIdx)
+            val atTheEnd = startPositionMs == null && startTrackIndex == null &&
+                savedTrackIdx == tracks.size - 1 && savedTrack != null &&
+                savedTrack.durationMs > 0 && savedPosMs >= savedTrack.durationMs - 3_000L
+            val initialTrackIdx = if (atTheEnd) 0 else savedTrackIdx
+            val initialPosMs = if (atTheEnd) 0L else savedPosMs
             val totalDuration = tracks.sumOf { it.durationMs }.coerceAtLeast(1L)
 
             val mediaItems = tracks.map { track ->
@@ -523,6 +542,10 @@ class AudiobookPlayerControllerImpl @Inject constructor(
                             .setTitle(track.title)
                             .setArtist(book.author)
                             .setAlbumTitle(book.title)
+                            // Cover art for the notification, lock screen and car / watch players
+                            .setArtworkUri(
+                                book.coverImagePath?.let { java.io.File(it) }?.takeIf { it.isFile }?.let { Uri.fromFile(it) }
+                            )
                             .setExtras(extras)
                             .build()
                     )
@@ -565,7 +588,9 @@ class AudiobookPlayerControllerImpl @Inject constructor(
     }
 
     override fun play() {
-        getActivePlayer().play()
+        val player = getActivePlayer()
+        rewindIfResumingAfterPause(player)
+        player.play()
     }
 
     override fun pause() {
@@ -574,7 +599,39 @@ class AudiobookPlayerControllerImpl @Inject constructor(
 
     override fun togglePlayPause() {
         val player = getActivePlayer()
-        if (player.isPlaying) player.pause() else player.play()
+        if (player.isPlaying) {
+            player.pause()
+        } else {
+            rewindIfResumingAfterPause(player)
+            player.play()
+        }
+    }
+
+    /**
+     * Resuming after a real pause steps back a few seconds (Settings › Listening), so the
+     * sentence you were in the middle of starts again instead of mid-word.
+     */
+    private fun rewindIfResumingAfterPause(player: Player) {
+        val seconds = appSettings.settings.value.rewindOnResumeSeconds
+        val pausedFor = System.currentTimeMillis() - pausedAtMs
+        if (seconds <= 0 || pausedAtMs == 0L || pausedFor < 5_000L) return
+        val target = (player.currentPosition - seconds * 1000L).coerceAtLeast(0L)
+        if (target < player.currentPosition) player.seekTo(target)
+        pausedAtMs = 0L
+    }
+
+    override fun unload() {
+        val player = getActivePlayer()
+        player.stop()
+        player.clearMediaItems()
+        pausedAtMs = 0L
+        bookmarksObserverJob?.cancel()
+        _playbackState.update {
+            AudiobookPlaybackState(
+                skipForwardIntervalMs = it.skipForwardIntervalMs,
+                skipBackwardIntervalMs = it.skipBackwardIntervalMs
+            )
+        }
     }
 
     override fun stop() {
@@ -881,7 +938,7 @@ class AudiobookPlayerControllerImpl @Inject constructor(
                 val totalBookDurMs = state.totalBookDurationMs.coerceAtLeast(trackDurMs).coerceAtLeast(1L)
 
                 val matchedChapterIdx = state.chapters.indexOfLast { ch ->
-                    (ch.startTimeMs ?: 0L) <= bookPosMs
+                    (ch.startTimeMs ?: Long.MAX_VALUE) <= bookPosMs
                 }.takeIf { it >= 0 } ?: 0
 
                 val syncedCue = withContext(Dispatchers.IO) {
@@ -926,7 +983,7 @@ class AudiobookPlayerControllerImpl @Inject constructor(
         _playbackState.update { state ->
             val track = state.tracks.getOrNull(trackIdx)
             val bookPos = (track?.startOffsetInBookMs ?: 0L) + positionMs
-            val chapterIdx = state.chapters.indexOfLast { (it.startTimeMs ?: 0L) <= bookPos }
+            val chapterIdx = state.chapters.indexOfLast { (it.startTimeMs ?: Long.MAX_VALUE) <= bookPos }
                 .takeIf { it >= 0 } ?: state.currentChapterIndex
             state.copy(
                 currentTrackIndex = trackIdx,
@@ -981,7 +1038,7 @@ class AudiobookPlayerControllerImpl @Inject constructor(
                 if (audioFiles.isNotEmpty()) {
                     var cumulativeMs = 0L
                     val discovered = audioFiles.mapIndexed { idx, file ->
-                        val estDurationMs = max(60_000L, (file.length() / (16 * 1024L)) * 1000L)
+                        val estDurationMs = probeDurationMs(file.uri.toString()).takeIf { it > 0L } ?: 1_000L
                         val track = AudioTrackEntity(
                             id = "${book.id}_track_$idx",
                             bookId = book.id,
@@ -1003,121 +1060,38 @@ class AudiobookPlayerControllerImpl @Inject constructor(
             }
         }
 
-        // Generate a real playable 24kHz WAV audiobook demo track & synced cues if not yet synthesized
-        val audioDir = File(context.filesDir, "audiobooks/${book.id}").apply { mkdirs() }
-        val demoWavFile = File(audioDir, "starter_audiobook_24k.wav")
-        val durationMs = 48_000L // 48 seconds across 4 chapters
-        if (!demoWavFile.exists() || demoWavFile.length() == 0L) {
-            generatePlayableStarterWavFile(demoWavFile, sampleRateHz = 24000, durationSeconds = 48)
+        // Single-file audiobook (.m4b / .mp3 / .m4a / ...): play the user's own file as one track.
+        if (book.format == BookFormat.AUDIO_FOLDER || book.fileUri.isBlank()) {
+            throw IllegalStateException("No playable audio files found for \"${book.title}\"")
         }
-
-        val trackId = "${book.id}_track_0"
+        val durationMs = probeDurationMs(book.fileUri).takeIf { it > 0L }
+            ?: book.totalDurationMs.coerceAtLeast(1L)
         val singleTrack = AudioTrackEntity(
-            id = trackId,
+            id = "${book.id}_track_0",
             bookId = book.id,
             trackIndex = 0,
             title = book.title,
-            fileUri = Uri.fromFile(demoWavFile).toString(),
-            mimeType = "audio/wav",
+            fileUri = book.fileUri,
+            mimeType = book.format.mimeType,
             durationMs = durationMs,
             startOffsetInBookMs = 0L,
-            bitrateKbps = 384,
-            sampleRateHz = 24000,
-            channels = 1,
-            fileSizeBytes = demoWavFile.length(),
-            waveformPeaks = defaultWaveform(seed = 7),
-            isTtsGenerated = true
+            fileSizeBytes = book.fileSizeBytes,
+            waveformPeaks = defaultWaveform(seed = 7)
         )
         audioTrackDao.upsertTrack(singleTrack)
-
-        val starterChapters = listOf(
-            ChapterEntity("${book.id}_ch_0", book.id, 0, title = "Chapter 1: The Architecture of Deep Reading", href = "ch1.xhtml", audioTrackId = trackId, startTimeMs = 0L, endTimeMs = 12_000L, isTtsConverted = true),
-            ChapterEntity("${book.id}_ch_1", book.id, 1, title = "Chapter 2: Acoustic Prosody & Dual-Coding Memory", href = "ch2.xhtml", audioTrackId = trackId, startTimeMs = 12_000L, endTimeMs = 24_000L, isTtsConverted = true),
-            ChapterEntity("${book.id}_ch_2", book.id, 2, title = "Chapter 3: On-Device Neural Synthesis with Kokoro-82M", href = "ch3.xhtml", audioTrackId = trackId, startTimeMs = 24_000L, endTimeMs = 36_000L, isTtsConverted = true),
-            ChapterEntity("${book.id}_ch_3", book.id, 3, title = "Chapter 4: Sentence Locators & Real-Time DOM Highlighting", href = "ch4.xhtml", audioTrackId = trackId, startTimeMs = 36_000L, endTimeMs = 48_000L, isTtsConverted = true)
-        )
-        chapterDao.upsertChapters(starterChapters)
-
-        val existingCues = ttsSyncCueDao.getCuesForChapter(book.id, 0)
-        if (existingCues.isEmpty()) {
-            val sampleSentences = listOf(
-                0 to "Deep reading is an active, contemplative cognitive process in which the reader constructs vivid mental models.",
-                0 to "Sustained immersion in long-form literature links visual word-form recognition with semantic memory.",
-                0 to "Every typographic parameter in OmniRead is engineered to preserve effortless reading flow.",
-                1 to "Dual-coding theory demonstrates that comprehension improves when visual typography is paired with spoken audio.",
-                1 to "When your eyes track a highlighted sentence while your ears process cadence, working memory load is balanced.",
-                1 to "OmniRead pre-buffers three sentences ahead of playback for zero-latency transitions.",
-                2 to "By integrating Kokoro-82M via Sherpa-ONNX, OmniRead delivers 24kHz float32 neural speech offline.",
-                2 to "Fifty-four distinct speaker embeddings and voice blending let you cast narrators for every book.",
-                2 to "Cloud TTS streams are cached on disk keyed by book, chapter, sentence hash, and voice ID.",
-                3 to "Every chapter is tokenized into SentenceLocator objects with exact character offsets and audio timestamps.",
-                3 to "Playing a converted M4B audiobook illuminates each spoken sentence in real time inside the reader.",
-                3 to "Tap 'Switch to Synced Text View' at any moment to jump straight into the highlighted page."
-            )
-            val cues = sampleSentences.mapIndexed { idx, (chIdx, text) ->
-                val startMs = idx * 4_000L
-                val endMs = startMs + 4_000L
-                com.example.data.local.entity.TtsSyncCueEntity(
-                    id = "${book.id}_cue_$idx",
-                    bookId = book.id,
-                    chapterIndex = chIdx,
-                    sentenceIndex = idx,
-                    audioTrackId = trackId,
-                    textContent = text,
-                    startCharOffset = (idx % 3) * 110,
-                    endCharOffset = ((idx % 3) + 1) * 110,
-                    startTimeMs = startMs,
-                    endTimeMs = endMs
-                )
-            }
-            ttsSyncCueDao.upsertCues(cues)
-        }
-
         return listOf(singleTrack)
     }
 
-    private fun generatePlayableStarterWavFile(
-        targetFile: File,
-        sampleRateHz: Int,
-        durationSeconds: Int
-    ) {
-        val totalSamples = sampleRateHz * durationSeconds
-        val dataBytesSize = totalSamples * 2
-        val header = ByteBuffer.allocate(44).order(ByteOrder.LITTLE_ENDIAN).apply {
-            put("RIFF".toByteArray(StandardCharsets.US_ASCII))
-            putInt(36 + dataBytesSize)
-            put("WAVE".toByteArray(StandardCharsets.US_ASCII))
-            put("fmt ".toByteArray(StandardCharsets.US_ASCII))
-            putInt(16)
-            putShort(1)
-            putShort(1)
-            putInt(sampleRateHz)
-            putInt(sampleRateHz * 2)
-            putShort(2)
-            putShort(16)
-            put("data".toByteArray(StandardCharsets.US_ASCII))
-            putInt(dataBytesSize)
-        }
-
-        targetFile.outputStream().buffered().use { out ->
-            out.write(header.array())
-            val chunkSamples = 4800
-            val byteChunk = ByteBuffer.allocate(chunkSamples * 2).order(ByteOrder.LITTLE_ENDIAN)
-            var sampleIdx = 0
-            while (sampleIdx < totalSamples) {
-                byteChunk.clear()
-                val limit = min(chunkSamples, totalSamples - sampleIdx)
-                for (i in 0 until limit) {
-                    val globalIdx = sampleIdx + i
-                    val t = globalIdx.toDouble() / sampleRateHz
-                    val cadenceEnv = (0.5 + 0.5 * sin(2.0 * PI * 3.6 * t)).coerceIn(0.05, 1.0)
-                    val carrier = 0.6 * sin(2.0 * PI * 175.0 * t) + 0.3 * sin(2.0 * PI * 520.0 * t)
-                    val pcmShort = (carrier * cadenceEnv * 6500.0).toInt().coerceIn(-32767, 32767).toShort()
-                    byteChunk.putShort(pcmShort)
-                }
-                out.write(byteChunk.array(), 0, limit * 2)
-                sampleIdx += limit
-            }
+    private fun probeDurationMs(uriString: String): Long {
+        val retriever = android.media.MediaMetadataRetriever()
+        return try {
+            retriever.setDataSource(context, Uri.parse(uriString))
+            retriever.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_DURATION)
+                ?.toLongOrNull() ?: 0L
+        } catch (e: Exception) {
+            0L
+        } finally {
+            runCatching { retriever.release() }
         }
     }
 

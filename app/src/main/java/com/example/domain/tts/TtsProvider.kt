@@ -54,7 +54,9 @@ data class CloudApiTtsConfig(
     val responseFormat: String = "pcm",
     val sampleRateHz: Int = 24000,
     val diskCacheEnabled: Boolean = true,
-    val maxDiskCacheBytes: Long = 512L * 1024L * 1024L
+    val maxDiskCacheBytes: Long = 512L * 1024L * 1024L,
+    /** API keys remembered per cloud engine (TtsEngineType.name → key). */
+    val apiKeysByEngine: Map<String, String> = emptyMap()
 )
 
 @Serializable
@@ -95,12 +97,31 @@ interface TtsProvider {
     fun release()
 }
 
+/** Install state of the on-device Kokoro model files. */
+data class KokoroModelState(
+    val installed: Boolean = false,
+    val busy: Boolean = false,
+    /** 0..1 while downloading, null when indeterminate (extracting / verifying). */
+    val progress: Float? = null,
+    val statusText: String = "Not installed",
+    val errorMessage: String? = null,
+    val installedSizeBytes: Long = 0L
+)
+
 interface LocalKokoroTtsProvider : TtsProvider {
     val modelConfig: StateFlow<OfflineTtsKokoroModelConfig>
+    val modelState: StateFlow<KokoroModelState>
 
     suspend fun updateKokoroModelConfig(config: OfflineTtsKokoroModelConfig): Result<Unit>
     suspend fun verifyModelFilesExist(): Boolean
+
+    /** Imports a user-picked model archive (.tar.bz2 from sherpa-onnx releases, or .zip). */
     suspend fun installBundledOrDownloadedModel(sourceArchiveUri: String): Result<OfflineTtsKokoroModelConfig>
+
+    /** Downloads and installs the official sherpa-onnx Kokoro int8 multi-lang v1.0 model. */
+    suspend fun downloadAndInstallModel(): Result<Unit>
+
+    suspend fun deleteInstalledModel()
 }
 
 interface CloudApiTtsProvider : TtsProvider {
@@ -162,7 +183,6 @@ interface LiveTtsSyncCoordinator {
 @Serializable
 enum class AudioExportFormat(val extension: String, val mimeType: String) {
     M4B("m4b", "audio/mp4"),
-    MP3("mp3", "audio/mpeg"),
     WAV("wav", "audio/wav")
 }
 
@@ -193,10 +213,15 @@ data class BatchConversionProgress(
     val currentSentenceIndex: Int = 0,
     val totalSentencesInChapter: Int = 0,
     val overallProgressFraction: Float = 0f,
+    /** Library id of the generated audiobook entry (set when the job finished). */
+    val outputAudiobookBookId: String? = null,
     val outputAudiobookFileUri: String? = null,
     val outputLrcSidecarPath: String? = null,
     val outputJsonSidecarPath: String? = null,
-    val errorMessage: String? = null
+    val errorMessage: String? = null,
+    val currentChapterTitle: String? = null,
+    /** Human-readable time left, e.g. "about 2 h 10 min left". */
+    val etaText: String? = null
 )
 
 interface BatchAudiobookExportManager {

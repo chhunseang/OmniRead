@@ -73,6 +73,8 @@ interface AudiobookPlayerController {
     fun pause()
     fun togglePlayPause()
     fun stop()
+    /** Stops and forgets the current book (e.g. it was deleted). */
+    fun unload()
 
     fun seekToTrackPosition(positionMs: Long)
     fun seekToBookPosition(bookPositionMs: Long)

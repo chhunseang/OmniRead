@@ -33,6 +33,15 @@ import kotlinx.coroutines.withContext
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.addJsonObject
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.put
+import kotlinx.serialization.json.putJsonArray
+import kotlinx.serialization.json.putJsonObject
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.RequestBody
@@ -129,12 +138,13 @@ class CloudApiTtsProviderImpl @Inject constructor(
 
     override suspend fun initialize(): Result<Unit> = withContext(ioDispatcher) {
         runCatching {
-            loadPersistedConfig()
             cacheRootDir.mkdirs()
-            _isReady.value = _cloudConfig.value.apiKey.isNotBlank() ||
-                _cloudConfig.value.baseUrl.startsWith("http://127.0.0.1") ||
-                _cloudConfig.value.baseUrl.startsWith("http://10.0.2.2") ||
-                _cloudConfig.value.baseUrl.startsWith("http://localhost")
+            val cfg = _cloudConfig.value
+            val ready = cfg.apiKey.isNotBlank() || isLocalEndpoint(cfg.baseUrl)
+            _isReady.value = ready
+            if (!ready) {
+                throw IllegalStateException("Add your ${engineLabel(cfg.engineType)} API key in TTS Studio first.")
+            }
         }
     }
 
@@ -251,7 +261,7 @@ class CloudApiTtsProviderImpl @Inject constructor(
             bookId = locator.bookId,
             chapterIndex = locator.chapterIndex,
             sentenceText = request.text,
-            voiceId = effectiveVoiceId,
+            voiceId = "${cfg.engineType.name}_${cfg.modelId}_$effectiveVoiceId",
             speed = effectiveSpeed
         )
 
@@ -278,7 +288,31 @@ class CloudApiTtsProviderImpl @Inject constructor(
             return@flow
         }
 
-        // 2. Build endpoint URL, headers, and payload for OpenAI / ElevenLabs / OpenAI-compatible
+        if (cfg.apiKey.isBlank() && !isLocalEndpoint(cfg.baseUrl)) {
+            throw IllegalStateException("Add your ${engineLabel(cfg.engineType)} API key in TTS Studio first.")
+        }
+
+        // 2a. Gemini native TTS (generateContent with AUDIO modality → base64 PCM16 @ 24 kHz)
+        if (cfg.engineType == TtsEngineType.CLOUD_GEMINI) {
+            val floats = synthesizeWithGemini(cfg, request.text, effectiveVoiceId)
+            if (cfg.diskCacheEnabled && floats.isNotEmpty()) {
+                writeFloat32PcmToDisk(cacheFile, floats)
+                enforceMaxDiskCacheQuota(cfg.maxDiskCacheBytes)
+            }
+            emit(
+                SynthesizedAudioChunk(
+                    requestId = request.requestId,
+                    sentenceLocator = locator,
+                    pcmFloatSamples = floats,
+                    sampleRateHz = 24000,
+                    channels = 1,
+                    cachedDiskFilePath = cacheFile.takeIf { it.exists() }?.absolutePath
+                )
+            )
+            return@flow
+        }
+
+        // 2b. Build endpoint URL, headers, and payload for OpenAI / ElevenLabs / OpenAI-compatible
         val (endpointUrl, headers, bodyJson) = buildHttpRequestParameters(
             cfg = cfg,
             text = request.text,
@@ -410,6 +444,61 @@ class CloudApiTtsProviderImpl @Inject constructor(
             }
         }
     }.flowOn(ioDispatcher)
+
+    private fun isLocalEndpoint(url: String): Boolean =
+        url.startsWith("http://127.0.0.1") || url.startsWith("http://10.0.2.2") ||
+            url.startsWith("http://localhost") || url.startsWith("http://192.168.")
+
+    private fun engineLabel(type: TtsEngineType): String = when (type) {
+        TtsEngineType.CLOUD_ELEVENLABS -> "ElevenLabs"
+        TtsEngineType.CLOUD_GEMINI -> "Gemini"
+        else -> "OpenAI"
+    }
+
+    private fun synthesizeWithGemini(cfg: CloudApiTtsConfig, text: String, voiceName: String): FloatArray {
+        val base = cfg.baseUrl.trim().trimEnd('/')
+            .takeIf { it.contains("generativelanguage.googleapis.com") }
+            ?: "https://generativelanguage.googleapis.com/v1beta"
+        val model = cfg.modelId.ifBlank { "gemini-2.5-flash-preview-tts" }
+        val payload = buildJsonObject {
+            putJsonArray("contents") {
+                addJsonObject {
+                    putJsonArray("parts") { addJsonObject { put("text", text) } }
+                }
+            }
+            putJsonObject("generationConfig") {
+                putJsonArray("responseModalities") { add(JsonPrimitive("AUDIO")) }
+                putJsonObject("speechConfig") {
+                    putJsonObject("voiceConfig") {
+                        putJsonObject("prebuiltVoiceConfig") { put("voiceName", voiceName.ifBlank { "Kore" }) }
+                    }
+                }
+            }
+        }
+        val httpRequest = okhttp3.Request.Builder()
+            .url("$base/models/$model:generateContent")
+            .header("x-goog-api-key", cfg.apiKey)
+            .post(payload.toString().toRequestBody("application/json; charset=utf-8".toMediaType()))
+            .build()
+        okHttpClient.newCall(httpRequest).execute().use { response ->
+            val bodyText = response.body?.string().orEmpty()
+            if (!response.isSuccessful) {
+                throw IllegalStateException("Gemini TTS HTTP ${response.code}: ${bodyText.take(300)}")
+            }
+            val root = json.parseToJsonElement(bodyText).jsonObject
+            val b64 = root["candidates"]?.jsonArray?.firstOrNull()?.jsonObject
+                ?.get("content")?.jsonObject
+                ?.get("parts")?.jsonArray
+                ?.firstNotNullOfOrNull { part ->
+                    part.jsonObject["inlineData"]?.jsonObject?.get("data")?.jsonPrimitive?.content
+                }
+                ?: throw IllegalStateException("Gemini TTS returned no audio: ${bodyText.take(200)}")
+            val pcm = android.util.Base64.decode(b64, android.util.Base64.DEFAULT)
+            val count = pcm.size / 2
+            val shorts = ByteBuffer.wrap(pcm).order(ByteOrder.LITTLE_ENDIAN).asShortBuffer()
+            return FloatArray(count) { i -> (shorts.get(i) / 32768.0f).coerceIn(-1f, 1f) }
+        }
+    }
 
     override fun cancelActiveSynthesis() {
         cancelRequested.set(true)
@@ -634,11 +723,12 @@ class CloudApiTtsProviderImpl @Inject constructor(
         )
 
         val GEMINI_AUDIO_VOICES = listOf(
-            TtsVoiceProfile("Puck", 0, "Puck (Gemini Live Voice)", "en-US", "Male", TtsEngineType.CLOUD_GEMINI, "Gemini 24kHz PCM"),
-            TtsVoiceProfile("Charon", 1, "Charon (Gemini Live Voice)", "en-US", "Male", TtsEngineType.CLOUD_GEMINI, "Gemini 24kHz PCM"),
-            TtsVoiceProfile("Kore", 2, "Kore (Gemini Live Voice)", "en-US", "Female", TtsEngineType.CLOUD_GEMINI, "Gemini 24kHz PCM"),
-            TtsVoiceProfile("Fenrir", 3, "Fenrir (Gemini Live Voice)", "en-US", "Male", TtsEngineType.CLOUD_GEMINI, "Gemini 24kHz PCM"),
-            TtsVoiceProfile("Aoede", 4, "Aoede (Gemini Live Voice)", "en-US", "Female", TtsEngineType.CLOUD_GEMINI, "Gemini 24kHz PCM")
-        )
+            "Kore" to "Female", "Puck" to "Male", "Charon" to "Male", "Fenrir" to "Male",
+            "Aoede" to "Female", "Zephyr" to "Female", "Leda" to "Female", "Orus" to "Male",
+            "Callirrhoe" to "Female", "Enceladus" to "Male", "Iapetus" to "Male", "Despina" to "Female",
+            "Algieba" to "Male", "Schedar" to "Male", "Sulafat" to "Female", "Achird" to "Male"
+        ).mapIndexed { i, (name, gender) ->
+            TtsVoiceProfile(name, i, name, "multi", gender, TtsEngineType.CLOUD_GEMINI, "Gemini TTS 24kHz PCM")
+        }
     }
 }

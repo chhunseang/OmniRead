@@ -2,6 +2,7 @@ package com.example.ui.audio
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.example.data.library.LibraryScannerService
 import com.example.data.local.dao.BookDao
 import com.example.data.local.dao.BookmarkDao
 import com.example.data.local.dao.TtsSyncCueDao
@@ -9,6 +10,9 @@ import com.example.data.local.entity.BookEntity
 import com.example.data.local.entity.BookFormat
 import com.example.data.local.entity.BookmarkEntity
 import com.example.data.local.entity.MediaType
+import com.example.data.local.entity.ReadingStatus
+import com.example.data.local.entity.isAudiobook
+import com.example.data.local.entity.isStudioMade
 import com.example.data.local.entity.TtsSyncCueEntity
 import com.example.domain.audio.AudiobookPlaybackState
 import com.example.domain.audio.AudiobookPlayerController
@@ -24,6 +28,9 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import javax.inject.Inject
 
+/** The Listen shelf filter. */
+enum class ShelfFilter(val label: String) { ALL("All"), YOURS("Your files"), STUDIO("Made in Studio") }
+
 enum class AudiobookSheetType {
     NONE,
     CHAPTERS_AND_TRACKS,
@@ -35,13 +42,17 @@ enum class AudiobookSheetType {
 data class AudiobookPlayerUiState(
     val availableAudiobooks: List<BookEntity> = emptyList(),
     val isSyncedTextViewMode: Boolean = false,
-    val hasSyncedTextAvailable: Boolean = true,
+    val hasSyncedTextAvailable: Boolean = false,
     val chapterSyncCues: List<TtsSyncCueEntity> = emptyList(),
     val activeSheet: AudiobookSheetType = AudiobookSheetType.NONE,
     val showCreateBookmarkDialog: Boolean = false,
     val bookmarkNoteDraft: String = "",
     val bookmarkLabelDraft: String = "",
-    val statusMessage: String? = null
+    val statusMessage: String? = null,
+    /** The full-screen "now playing" view is open (otherwise the shelf + mini player show). */
+    val playerExpanded: Boolean = false,
+    /** Which audiobooks the shelf shows: all, the files you added, or Studio narrations. */
+    val shelfFilter: ShelfFilter = ShelfFilter.ALL
 )
 
 @HiltViewModel
@@ -49,7 +60,9 @@ class AudiobookPlayerViewModel @Inject constructor(
     private val playerController: AudiobookPlayerController,
     private val bookDao: BookDao,
     private val bookmarkDao: BookmarkDao,
-    private val ttsSyncCueDao: TtsSyncCueDao
+    private val ttsSyncCueDao: TtsSyncCueDao,
+    private val scannerService: LibraryScannerService,
+    private val audioStore: com.example.data.audio.StudioAudiobookStore
 ) : ViewModel() {
 
     val playbackState: StateFlow<AudiobookPlaybackState> = playerController.playbackState
@@ -58,53 +71,71 @@ class AudiobookPlayerViewModel @Inject constructor(
     val uiState: StateFlow<AudiobookPlayerUiState> = _uiState.asStateFlow()
 
     init {
-        seedDefaultAudiobookIfNeeded()
         observeAudiobookLibrary()
+        viewModelScope.launch { runCatching { audioStore.pruneOrphanFiles() } }
         observeActiveChapterCues()
-    }
-
-    private fun seedDefaultAudiobookIfNeeded() {
-        viewModelScope.launch(Dispatchers.IO) {
-            val defaultAudioId = "omniread_starter_audiobook_m4b"
-            var existing = bookDao.getBookById(defaultAudioId)
-            if (existing == null) {
-                val starterAudiobook = BookEntity(
-                    id = defaultAudioId,
-                    title = "The Art of Deep Reading (Mastered M4B Audiobook)",
-                    subtitle = "24kHz Chapterized Edition with LRC/JSON Sync Cues",
-                    author = "Elena Vance",
-                    narrator = "Kokoro Heart (af_heart)",
-                    description = "Full-length chapterized audiobook with embedded chapter markers, RMS waveform peaks, and synchronized sentence cues.",
-                    publisher = "OmniRead Audio Studio",
-                    language = "en",
-                    format = BookFormat.M4B,
-                    mediaType = MediaType.HYBRID_SYNCED,
-                    fileUri = "file:///internal/starter_audiobook_24k.wav",
-                    seriesName = "OmniRead Classics",
-                    seriesIndex = 1f,
-                    tags = listOf("Audiobook", "M4B", "Synced Text"),
-                    totalChapters = 4,
-                    totalDurationMs = 48_000L,
-                    syncedSidecarPath = "internal://starter_audiobook.sync.json"
-                )
-                bookDao.upsertBook(starterAudiobook)
-                existing = starterAudiobook
-            }
-            playerController.loadAudiobook(existing.id, autoPlay = false)
-        }
     }
 
     private fun observeAudiobookLibrary() {
         viewModelScope.launch {
             bookDao.observeAllBooks().collectLatest { books ->
-                val audioCapable = books.filter {
-                    it.mediaType == MediaType.AUDIOBOOK ||
-                        it.mediaType == MediaType.HYBRID_SYNCED ||
-                        !it.syncedAudiobookUri.isNullOrBlank()
-                }
+                // Only real audiobooks (files you added + Studio narrations); books stay in Library.
+                // Most recently listened first, then newest additions.
+                val audiobooks = books.filter { it.isAudiobook }
+                    .sortedByDescending { maxOf(it.lastOpenedAt ?: 0L, it.addedAt) }
                 _uiState.update { state ->
-                    state.copy(availableAudiobooks = audioCapable.ifEmpty { books })
+                    state.copy(availableAudiobooks = audiobooks)
                 }
+            }
+        }
+    }
+
+    // --- Shelf: filter and per-book actions ---
+
+    fun setShelfFilter(filter: ShelfFilter) = _uiState.update { it.copy(shelfFilter = filter) }
+
+    fun shareIntent(book: BookEntity): android.content.Intent? = audioStore.shareIntent(book)
+
+    fun suggestedFileName(book: BookEntity) = audioStore.suggestedFileName(book)
+
+    fun mimeType(book: BookEntity) = audioStore.mimeType(book)
+
+    fun fileSizeBytes(book: BookEntity) = audioStore.sizeBytes(book)
+
+    fun saveToDevice(book: BookEntity, destination: String) {
+        viewModelScope.launch {
+            audioStore.saveTo(book, android.net.Uri.parse(destination))
+                .onSuccess { _uiState.update { it.copy(statusMessage = "Saved \"${book.title}\"") } }
+                .onFailure { err -> _uiState.update { it.copy(statusMessage = "Couldn't save: ${err.message}") } }
+        }
+    }
+
+    /** Studio narrations are deleted with their files; audiobooks you added just leave Listen. */
+    fun deleteOrRemove(book: BookEntity) {
+        viewModelScope.launch {
+            if (book.isStudioMade) {
+                audioStore.deleteStudioAudiobook(book)
+                _uiState.update { it.copy(statusMessage = "Deleted \"${book.title}\"") }
+            } else {
+                audioStore.removeFromListen(book)
+                _uiState.update { it.copy(statusMessage = "Removed \"${book.title}\" from Listen · the file is still on your phone") }
+            }
+        }
+    }
+
+    fun setFinished(book: BookEntity, finished: Boolean) {
+        viewModelScope.launch(Dispatchers.IO) {
+            val updated = if (finished) {
+                book.copy(readingStatus = ReadingStatus.COMPLETED, progressionPercentage = 1f, completedAt = System.currentTimeMillis())
+            } else {
+                book.copy(
+                    readingStatus = ReadingStatus.UNREAD, progressionPercentage = 0f, completedAt = null,
+                    currentAudioTrackIndex = 0, currentAudioPositionMs = 0L, currentChapterIndex = 0
+                )
+            }
+            bookDao.updateBook(updated)
+            if (!finished && playbackState.value.activeBook?.id == book.id) {
+                kotlinx.coroutines.withContext(Dispatchers.Main) { playerController.seekToBookPosition(0L) }
             }
         }
     }
@@ -133,29 +164,51 @@ class AudiobookPlayerViewModel @Inject constructor(
         }
     }
 
+    /** Tapping a book on the shelf: start (or resume) it and open the full player. */
+    fun openAudiobook(bookId: String) {
+        _uiState.update { it.copy(playerExpanded = true) }
+        if (playbackState.value.activeBook?.id == bookId) {
+            if (!playbackState.value.isPlaying) playerController.play()
+            return
+        }
+        viewModelScope.launch {
+            playerController.loadAudiobook(bookId, autoPlay = true)
+                .onFailure { err ->
+                    _uiState.update { it.copy(playerExpanded = false, statusMessage = "Couldn't play this audiobook: ${err.message}") }
+                }
+        }
+    }
+
+    fun expandPlayer() = _uiState.update { it.copy(playerExpanded = true) }
+
+    fun collapsePlayer() = _uiState.update { it.copy(playerExpanded = false, activeSheet = AudiobookSheetType.NONE) }
+
+    fun dismissStatus() = _uiState.update { it.copy(statusMessage = null) }
+
     fun importAudiobookFileOrFolderUri(uriString: String, displayName: String, isFolder: Boolean) {
-        viewModelScope.launch(Dispatchers.IO) {
-            val id = "imported_audio_${uriString.hashCode() and 0x7FFFFFFF}"
-            val format = if (isFolder) {
-                BookFormat.AUDIO_FOLDER
+        viewModelScope.launch {
+            val result = if (isFolder) {
+                scannerService.importAudiobookFolder(uriString)
             } else {
-                BookFormat.fromExtension(displayName.substringAfterLast('.', "m4b"))
+                scannerService.importSingleDocumentUri(uriString)
             }
-            val importedBook = BookEntity(
-                id = id,
-                title = displayName.substringBeforeLast('.').ifBlank { "Imported Audiobook" },
-                author = "Local Audiobook",
-                narrator = if (isFolder) "Multi-File Folder" else format.name,
-                format = format,
-                mediaType = MediaType.AUDIOBOOK,
-                fileUri = uriString,
-                totalDurationMs = 180_000L
-            )
-            bookDao.upsertBook(importedBook)
-            playerController.loadAudiobook(id, autoPlay = true)
-            _uiState.update {
-                it.copy(statusMessage = "Loaded ${importedBook.title}")
-            }
+            result
+                .onSuccess { imported ->
+                    if (imported.mediaType == MediaType.EBOOK) {
+                        _uiState.update {
+                            it.copy(statusMessage = "\"${imported.title}\" is an eBook – added to your Library")
+                        }
+                        return@onSuccess
+                    }
+                    playerController.loadAudiobook(imported.id, autoPlay = true)
+                        .onFailure { err ->
+                            _uiState.update { it.copy(statusMessage = "Could not play ${imported.title}: ${err.message}") }
+                        }
+                    _uiState.update { it.copy(statusMessage = "Added \"${imported.title}\"", playerExpanded = true) }
+                }
+                .onFailure { err ->
+                    _uiState.update { it.copy(statusMessage = "Import failed ($displayName): ${err.message}") }
+                }
         }
     }
 

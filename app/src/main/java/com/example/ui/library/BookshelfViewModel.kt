@@ -9,6 +9,7 @@ import com.example.data.local.entity.BookEntity
 import com.example.data.local.entity.MediaType
 import com.example.data.local.entity.ReadingSessionEntity
 import com.example.data.local.entity.ReadingStatus
+import com.example.data.local.entity.isAudiobook
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -16,6 +17,9 @@ import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.mapLatest
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
@@ -24,19 +28,30 @@ import javax.inject.Inject
 import kotlin.math.roundToInt
 
 enum class BookshelfFilterTab(val label: String) {
-    ALL("All Books"),
-    EBOOKS("eBooks"),
-    AUDIOBOOKS("Audiobooks"),
-    HYBRID_SYNCED("Synced AI"),
-    FAVORITES("Favorites"),
-    SERIES("Series")
+    ALL("All"),
+    READING("Reading"),
+    NOT_STARTED("Not started"),
+    FINISHED("Finished"),
+    FAVORITES("Favorites")
 }
+
+/** Where you are in a book. */
+enum class ReadingState { NOT_STARTED, READING, FINISHED }
+
+fun BookEntity.readingState(): ReadingState = when {
+    readingStatus == ReadingStatus.COMPLETED || progressionPercentage >= 0.99f -> ReadingState.FINISHED
+    progressionPercentage > 0.005f || lastOpenedAt != null -> ReadingState.READING
+    else -> ReadingState.NOT_STARTED
+}
+
+/** The book to pick back up, with the chapter you're in. */
+data class ContinueReading(val book: BookEntity, val chapterTitle: String?)
 
 data class ReadingAnalyticsSummary(
     val totalHoursRead: Float = 0f,
     val totalWordsRead: Int = 0,
-    val averageWpm: Int = 245,
-    val currentDailyStreakDays: Int = 1,
+    val averageWpm: Int = 0,
+    val currentDailyStreakDays: Int = 0,
     val booksCompletedCount: Int = 0
 )
 
@@ -64,6 +79,7 @@ data class BookshelfUiState(
 @HiltViewModel
 class BookshelfViewModel @Inject constructor(
     private val bookDao: BookDao,
+    private val chapterDao: com.example.data.local.dao.ChapterDao,
     private val readingSessionDao: ReadingSessionDao,
     private val scannerService: LibraryScannerService
 ) : ViewModel() {
@@ -71,7 +87,30 @@ class BookshelfViewModel @Inject constructor(
     private val _uiState = MutableStateFlow(BookshelfUiState())
     val uiState: StateFlow<BookshelfUiState> = _uiState.asStateFlow()
 
-    private val allBooksFlow = bookDao.observeAllBooks()
+    // The Library holds books you read; audiobooks live in Listen
+    private val allBooksFlow = bookDao.observeAllBooks().map { books -> books.filter { !it.isAudiobook } }
+
+    /** The book you were last reading (not finished), for the "Continue reading" card. */
+    @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
+    val continueReading: StateFlow<ContinueReading?> = allBooksFlow
+        .map { books ->
+            books.filter { it.lastOpenedAt != null && it.readingState() != ReadingState.FINISHED }
+                .maxByOrNull { it.lastOpenedAt ?: 0L }
+        }
+        .distinctUntilChanged()
+        .mapLatest { book ->
+            book?.let {
+                val title = runCatching { chapterDao.getChapterByIndex(it.id, it.currentChapterIndex)?.title }.getOrNull()
+                ContinueReading(it, title)
+            }
+        }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), null)
+
+    val scanProgress: StateFlow<String?> = scannerService.scanProgress
+
+    /** Every book (unfiltered) – for the sources sheet and tag / collection suggestions. */
+    val allBooks: StateFlow<List<BookEntity>> = allBooksFlow
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
     val watchedFolderUris: StateFlow<Set<String>> = scannerService.watchedFolderUris
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptySet())
@@ -83,11 +122,10 @@ class BookshelfViewModel @Inject constructor(
         books.filter { book ->
             val matchesTab = when (state.filterTab) {
                 BookshelfFilterTab.ALL -> true
-                BookshelfFilterTab.EBOOKS -> book.mediaType == MediaType.EBOOK
-                BookshelfFilterTab.AUDIOBOOKS -> book.mediaType == MediaType.AUDIOBOOK
-                BookshelfFilterTab.HYBRID_SYNCED -> book.mediaType == MediaType.HYBRID_SYNCED
+                BookshelfFilterTab.READING -> book.readingState() == ReadingState.READING
+                BookshelfFilterTab.NOT_STARTED -> book.readingState() == ReadingState.NOT_STARTED
+                BookshelfFilterTab.FINISHED -> book.readingState() == ReadingState.FINISHED
                 BookshelfFilterTab.FAVORITES -> book.isFavorite
-                BookshelfFilterTab.SERIES -> !book.seriesName.isNullOrBlank()
             }
             val q = state.searchQuery.trim()
             val matchesSearch = q.isEmpty() ||
@@ -117,38 +155,43 @@ class BookshelfViewModel @Inject constructor(
         ReadingAnalyticsSummary(
             totalHoursRead = hours,
             totalWordsRead = totalWords,
-            averageWpm = avgWpm.roundToInt().takeIf { it > 0 } ?: 245,
+            averageWpm = avgWpm.roundToInt().coerceAtLeast(0),
             currentDailyStreakDays = streak,
             booksCompletedCount = completed
         )
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), ReadingAnalyticsSummary())
 
     init {
-        seedInitialAnalyticsSessionIfNeeded()
+        purgeLegacyDemoContent()
     }
 
-    private fun seedInitialAnalyticsSessionIfNeeded() {
+    /**
+     * Earlier builds seeded a fake starter eBook, a synthetic audiobook and a fake reading
+     * session. Remove them (and their generated files) so the library only holds the user's own books.
+     */
+    private fun purgeLegacyDemoContent() {
         viewModelScope.launch(Dispatchers.IO) {
-            val todayEpochDay = System.currentTimeMillis() / (24L * 60L * 60L * 1000L)
-            val starterSession = ReadingSessionEntity(
-                id = "starter_session_day_$todayEpochDay",
-                bookId = "omniread_starter_odyssey",
-                mediaType = MediaType.EBOOK,
-                sessionDateEpochDay = todayEpochDay,
-                startedAt = System.currentTimeMillis() - 1_800_000L,
-                endedAt = System.currentTimeMillis(),
-                durationMs = 1_800_000L, // 0.5h
-                wordsRead = 7_350,
-                pagesRead = 29,
-                averageWpm = 245,
-                startProgression = 0f,
-                endProgression = 0.22f,
-                usedTtsReadAloud = true
-            )
-            runCatching {
-                readingSessionDao.insertSession(starterSession)
+            runCatching { bookDao.revertHybridBooksToEbooks() }
+            LEGACY_DEMO_BOOK_IDS.forEach { id ->
+                runCatching {
+                    readingSessionDao.deleteSessionsForBook(id)
+                    bookDao.deleteBookById(id)
+                }
             }
+            scannerService.deleteGeneratedFilesForBooks(LEGACY_DEMO_BOOK_IDS)
+            runCatching { scannerService.backfillMissingCovers() }
         }
+    }
+
+    private companion object {
+        val LEGACY_DEMO_BOOK_IDS = listOf(
+            "omniread_starter_odyssey",
+            "omniread_starter_audiobook_m4b"
+        )
+    }
+
+    fun dismissStatus() {
+        _uiState.update { it.copy(statusMessage = null) }
     }
 
     fun selectFilterTab(tab: BookshelfFilterTab) {
@@ -181,7 +224,7 @@ class BookshelfViewModel @Inject constructor(
                     _uiState.update {
                         it.copy(
                             isScanningFolders = false,
-                            statusMessage = "Scanned ${summary.scannedFilesCount} files: imported ${summary.importedEbooksCount} eBooks & ${summary.importedAudiobooksCount} Audiobooks"
+                            statusMessage = "Added ${summary.importedEbooksCount} books" + (if (summary.importedAudiobooksCount > 0) " · ${summary.importedAudiobooksCount} audiobooks to Listen" else "")
                         )
                     }
                 }
@@ -201,7 +244,7 @@ class BookshelfViewModel @Inject constructor(
             scannerService.importSingleDocumentUri(uriString)
                 .onSuccess { imported ->
                     _uiState.update {
-                        it.copy(statusMessage = "Imported \"${imported.title}\" (${imported.format.name})")
+                        it.copy(statusMessage = if (imported.isAudiobook) "Added \"${imported.title}\" to Listen" else "Added \"${imported.title}\"")
                     }
                 }
                 .onFailure { err ->
@@ -209,6 +252,13 @@ class BookshelfViewModel @Inject constructor(
                         it.copy(statusMessage = "Import error: ${err.message}")
                     }
                 }
+        }
+    }
+
+    fun removeWatchedFolder(treeUri: String) {
+        viewModelScope.launch {
+            scannerService.removeWatchedFolder(treeUri)
+            _uiState.update { it.copy(statusMessage = "Folder removed (its books stay in your library)") }
         }
     }
 
@@ -285,7 +335,10 @@ class BookshelfViewModel @Inject constructor(
     }
 
     private fun calculateConsecutiveStreakDays(sortedEpochDaysDesc: List<Long>): Int {
-        if (sortedEpochDaysDesc.isEmpty()) return 1
+        if (sortedEpochDaysDesc.isEmpty()) return 0
+        val todayEpochDay = System.currentTimeMillis() / (24L * 60L * 60L * 1000L)
+        // A streak only counts if the most recent reading day is today or yesterday.
+        if (todayEpochDay - sortedEpochDaysDesc.first() > 1L) return 0
         var streak = 1
         for (i in 0 until sortedEpochDaysDesc.size - 1) {
             val diff = sortedEpochDaysDesc[i] - sortedEpochDaysDesc[i + 1]

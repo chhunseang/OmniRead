@@ -16,3 +16,17 @@
 local.properties
 .env
 debug.keystore
+
+# IDE
+.idea/
+
+# Signing material (never commit)
+*.jks
+*.keystore
+signing.properties
+keystore.properties
+
+# Release outputs
+/app/release/
+*.apk
+*.aab

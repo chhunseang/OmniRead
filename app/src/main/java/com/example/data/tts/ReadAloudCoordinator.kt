@@ -111,10 +111,7 @@ class ReadAloudCoordinator @Inject constructor(
         rawHtmlOrText: String,
         locale: Locale = Locale.US
     ): List<SentenceLocator> {
-        val isHtml = rawHtmlOrText.contains("<html", ignoreCase = true) ||
-            rawHtmlOrText.contains("<body", ignoreCase = true) ||
-            rawHtmlOrText.contains("<p", ignoreCase = true) ||
-            rawHtmlOrText.contains("<div", ignoreCase = true)
+        val isHtml = com.example.data.reader.looksLikeHtml(rawHtmlOrText)
 
         data class ParagraphBlock(
             val paragraphIndex: Int,
@@ -126,36 +123,21 @@ class ReadAloudCoordinator @Inject constructor(
         if (isHtml) {
             val doc = Jsoup.parse(rawHtmlOrText)
             doc.select("script, style, nav, head").remove()
-            val blockElements = doc.body().select("h1, h2, h3, h4, h5, h6, p, li, blockquote")
-            if (blockElements.isNotEmpty()) {
-                var pIdx = 0
-                for (el in blockElements) {
-                    // Skip nested block containers that duplicate child <p> text
-                    if (el.children().any { child ->
-                            child.tagName() in setOf("p", "li", "blockquote", "h1", "h2", "h3")
-                        }
-                    ) {
-                        continue
-                    }
-                    val text = el.text().trim()
-                    if (text.isNotEmpty()) {
-                        blocks.add(
-                            ParagraphBlock(
-                                paragraphIndex = pIdx++,
-                                text = text,
-                                domSelector = buildCssSelector(el, pIdx)
-                            )
-                        )
-                    }
-                }
-            } else {
-                val fallbackText = doc.body().text().trim()
-                if (fallbackText.isNotEmpty()) {
-                    blocks.add(ParagraphBlock(0, fallbackText, "body"))
-                }
+            // Shared with the reader's style extractor so paragraph indices always match
+            var pIdx = 0
+            for ((el, text) in com.example.data.reader.readableBlocks(doc)) {
+                val selector = if (el.tagName() == "body") "body" else buildCssSelector(el, pIdx + 1)
+                blocks.add(ParagraphBlock(paragraphIndex = pIdx++, text = text, domSelector = selector))
             }
         } else {
-            val rawParagraphs = rawHtmlOrText.split(Regex("\\n\\s*\\n+"))
+            val normalized = rawHtmlOrText.replace("\r\n", "\n")
+            val byBlankLines = normalized.split(Regex("\\n\\s*\\n+"))
+            // Plain-text books use either blank lines or single newlines between paragraphs
+            val rawParagraphs = if (byBlankLines.size > 1) {
+                byBlankLines.map { it.replace(Regex("\\s*\\n\\s*"), " ") }
+            } else {
+                normalized.split('\n')
+            }
             var pIdx = 0
             for (para in rawParagraphs) {
                 val cleaned = para.trim()
@@ -379,165 +361,117 @@ class ReadAloudCoordinator @Inject constructor(
         startIndex: Int
     ) {
         val lookaheadCapacity = _sessionState.value.preBufferLookaheadCount.coerceIn(2, 4)
-        // Bounded Channel of capacity = lookaheadCapacity (default 3 sentences ahead)
+        // Bounded channel: the producer synthesizes up to N sentences ahead of playback
         val sentenceChannel = Channel<SynthesizedSentencePacket>(capacity = lookaheadCapacity)
 
         pipelineJob = coordinatorScope.launch {
-            val provider = selectActiveTtsProvider(_sessionState.value.activeEngine)
+            val engine = _sessionState.value.activeEngine
+            val provider = selectActiveTtsProvider(engine)
             val initResult = provider.initialize()
             if (initResult.isFailure) {
-                _sessionState.update {
-                    it.copy(
-                        status = LiveTtsReadAloudStatus.ERROR,
-                        errorMessage = initResult.exceptionOrNull()?.message
-                            ?: "Failed to initialize TTS engine"
-                    )
-                }
+                failSession(initResult.exceptionOrNull()?.message ?: "Failed to initialize the TTS engine")
                 return@launch
             }
 
             _sessionState.update { it.copy(status = LiveTtsReadAloudStatus.PRE_BUFFERING) }
 
-            // Producer Coroutine: pre-synthesizes the next N sentences in parallel ahead of playback
+            // Producer: pre-synthesizes upcoming sentences
             val producerJob = launch(Dispatchers.Default) {
                 try {
                     for (idx in startIndex until sentences.size) {
                         if (!isActive) break
                         val locator = sentences[idx]
-                        val currentSnapshot = _sessionState.value
-
+                        val snapshot = _sessionState.value
                         val request = TtsSynthesisRequest(
                             requestId = "${bookId}_ch${chapterIndex}_s${idx}_${System.currentTimeMillis()}",
                             sentenceLocator = locator,
                             text = locator.text,
-                            engineType = currentSnapshot.activeEngine,
-                            voiceId = currentSnapshot.activeVoiceId,
-                            speakerId = currentSnapshot.activeSpeakerId,
-                            speed = currentSnapshot.playbackSpeed
+                            engineType = snapshot.activeEngine,
+                            voiceId = snapshot.activeVoiceId,
+                            speakerId = snapshot.activeSpeakerId,
+                            speed = snapshot.playbackSpeed
                         )
-
-                        val collectedChunks = ArrayList<SynthesizedAudioChunk>()
+                        val chunks = ArrayList<SynthesizedAudioChunk>()
                         var sampleRate = LocalKokoroTtsProviderImpl.SAMPLE_RATE_24KHZ
                         var totalDurationMs = 0L
-
-                        try {
-                            provider.synthesizeStream(request).collect { chunk ->
-                                collectedChunks.add(chunk)
-                                sampleRate = chunk.sampleRateHz
-                                totalDurationMs += chunk.durationMs
-                            }
-                        } catch (ce: CancellationException) {
-                            throw ce
-                        } catch (err: Exception) {
-                            Log.w(TAG, "Primary TTS provider failed on sentence $idx, falling back to Local Kokoro", err)
-                            localKokoroProvider.synthesizeStream(request).collect { chunk ->
-                                collectedChunks.add(chunk)
-                                sampleRate = chunk.sampleRateHz
-                                totalDurationMs += chunk.durationMs
-                            }
+                        provider.synthesizeStream(request).collect { chunk ->
+                            chunks.add(chunk)
+                            sampleRate = chunk.sampleRateHz
+                            totalDurationMs += chunk.durationMs
                         }
-
-                        if (collectedChunks.isNotEmpty() && isActive) {
-                            val packet = SynthesizedSentencePacket(
-                                sentenceIndex = idx,
-                                locator = locator,
-                                chunks = collectedChunks,
-                                sampleRateHz = sampleRate,
-                                totalDurationMs = totalDurationMs
+                        if (chunks.isNotEmpty() && isActive) {
+                            sentenceChannel.send(
+                                SynthesizedSentencePacket(idx, locator, chunks, sampleRate, totalDurationMs)
                             )
-                            _sessionState.update { state ->
-                                state.copy(
-                                    bufferedSentenceIndices = (state.bufferedSentenceIndices + idx)
-                                        .distinct()
-                                        .takeLast(lookaheadCapacity + 1)
-                                )
-                            }
-                            sentenceChannel.send(packet)
                         }
                     }
-                } finally {
                     sentenceChannel.close()
+                } catch (ce: CancellationException) {
+                    sentenceChannel.close()
+                    throw ce
+                } catch (err: Exception) {
+                    Log.e(TAG, "TTS synthesis failed", err)
+                    sentenceChannel.close(err)
                 }
             }
 
-            // Consumer Coroutine: pulls pre-buffered packets from Channel, updates active SentenceLocator
-            // StateFlow, triggers auto-page-turn if needed, and streams float32 PCM to AudioTrack
-            var cumulativeChapterTimeMs = 0L
+            // Highlight follower: moves the highlight when the AudioTrack actually reaches a sentence
+            val highlightQueue = ArrayDeque<Pair<Long, SentenceLocator>>()
+            var framesWritten = 0L
+            var currentTrack: AudioTrack? = null
+            val follower = launch {
+                while (isActive) {
+                    val track = audioTrack
+                    if (track != null && track === currentTrack) {
+                        val head = runCatching { track.playbackHeadPosition.toLong() and 0xFFFFFFFFL }.getOrDefault(0L)
+                        var reached: SentenceLocator? = null
+                        synchronized(highlightQueue) {
+                            while (highlightQueue.isNotEmpty() && highlightQueue.first().first <= head) {
+                                reached = highlightQueue.removeFirst().second
+                            }
+                        }
+                        reached?.let { markSentenceActive(it) }
+                    }
+                    delay(40L)
+                }
+            }
+
+            // Consumer: writes PCM to the AudioTrack in order
             try {
                 for (packet in sentenceChannel) {
                     if (!isActive) break
-
-                    while (isPausedFlag.get() && isActive) {
-                        delay(60L)
-                    }
+                    while (isPausedFlag.get() && isActive) delay(60L)
                     if (!isActive) break
 
-                    val locator = packet.locator
-                    val shouldTurnPage = _sessionState.value.autoTurnPageOnViewportEnd &&
-                        locator.startCharOffset >= viewportEndCharOffset
-
-                    _activeSentenceFlow.value = locator
-                    _sessionState.update { state ->
-                        state.copy(
-                            status = if (isPausedFlag.get()) {
-                                LiveTtsReadAloudStatus.PAUSED
-                            } else {
-                                LiveTtsReadAloudStatus.PLAYING
-                            },
-                            activeSentence = locator,
-                            bufferedSentenceIndices = state.bufferedSentenceIndices.filter { it > packet.sentenceIndex }
-                        )
-                    }
-
-                    _uiEvents.tryEmit(
-                        ReadAloudUiEvent.HighlightSentenceChanged(
-                            sentenceLocator = locator,
-                            shouldAutoAdvanceViewport = shouldTurnPage
-                        )
-                    )
-
-                    val startTimeMs = cumulativeChapterTimeMs
-                    val endTimeMs = startTimeMs + packet.totalDurationMs
-                    cumulativeChapterTimeMs = endTimeMs
-
-                    // Persist TtsSyncCueEntity & reading position in background
-                    launch(Dispatchers.IO) {
-                        val cue = TtsSyncCueEntity(
-                            id = locator.sentenceId.ifBlank { UUID.randomUUID().toString() },
-                            bookId = bookId,
-                            chapterIndex = chapterIndex,
-                            sentenceIndex = locator.sentenceIndex,
-                            textContent = locator.text,
-                            startCharOffset = locator.startCharOffset,
-                            endCharOffset = locator.endCharOffset,
-                            domSelector = locator.domCssSelector,
-                            locatorJson = locator.cfiRange,
-                            startTimeMs = startTimeMs,
-                            endTimeMs = endTimeMs,
-                            cachedPcmOrAudioPath = packet.chunks.firstOrNull()?.cachedDiskFilePath,
-                            ttsEngine = _sessionState.value.activeEngine,
-                            voiceId = _sessionState.value.activeVoiceId
-                        )
-                        ttsSyncCueDao.upsertCue(cue)
-                        bookDao.updateReadingPosition(
-                            bookId = bookId,
-                            chapterIndex = chapterIndex,
-                            locatorJson = locator.cfiRange,
-                            charOffset = locator.startCharOffset,
-                            progression = locator.progressionInChapter,
-                            status = ReadingStatus.READING
-                        )
-                    }
-
-                    // Stream all float32 PCM chunks for this sentence through AudioTrack
                     val track = ensureAudioTrackInitialized(packet.sampleRateHz)
+                    if (track !== currentTrack) {
+                        currentTrack = track
+                        framesWritten = 0L
+                        synchronized(highlightQueue) { highlightQueue.clear() }
+                    }
+                    synchronized(highlightQueue) { highlightQueue.addLast(framesWritten to packet.locator) }
                     for (chunk in packet.chunks) {
                         if (!isActive) break
-                        writeFloatPcmBlockingWithPauseSupport(track, chunk.pcmFloatSamples)
+                        framesWritten += writeFloatPcmBlockingWithPauseSupport(track, chunk.pcmFloatSamples)
                     }
+                    // ~120 ms of silence between sentences for natural pacing
+                    framesWritten += writeFloatPcmBlockingWithPauseSupport(
+                        track,
+                        FloatArray(packet.sampleRateHz * 12 / 100)
+                    )
                 }
 
                 if (isActive) {
+                    // Let the buffered tail finish playing before moving on
+                    val track = currentTrack
+                    var waited = 0
+                    while (isActive && track != null && waited < 15_000 &&
+                        runCatching { track.playbackHeadPosition.toLong() and 0xFFFFFFFFL }.getOrDefault(framesWritten) < framesWritten
+                    ) {
+                        delay(50L)
+                        waited += 50
+                    }
+                    follower.cancel()
                     _sessionState.update { it.copy(status = LiveTtsReadAloudStatus.IDLE) }
                     _uiEvents.tryEmit(
                         ReadAloudUiEvent.ChapterCompleted(
@@ -547,10 +481,39 @@ class ReadAloudCoordinator @Inject constructor(
                         )
                     )
                 }
+            } catch (ce: CancellationException) {
+                throw ce
+            } catch (err: Exception) {
+                failSession(err.message ?: "Read-aloud failed")
             } finally {
+                follower.cancel()
                 producerJob.cancel()
             }
         }
+    }
+
+    private fun markSentenceActive(locator: SentenceLocator) {
+        _activeSentenceFlow.value = locator
+        _sessionState.update { state ->
+            state.copy(
+                status = if (isPausedFlag.get()) LiveTtsReadAloudStatus.PAUSED else LiveTtsReadAloudStatus.PLAYING,
+                activeSentence = locator
+            )
+        }
+        _uiEvents.tryEmit(
+            ReadAloudUiEvent.HighlightSentenceChanged(
+                sentenceLocator = locator,
+                shouldAutoAdvanceViewport = locator.startCharOffset >= viewportEndCharOffset
+            )
+        )
+    }
+
+    private fun failSession(message: String) {
+        runCatching {
+            audioTrack?.pause()
+            audioTrack?.flush()
+        }
+        _sessionState.update { it.copy(status = LiveTtsReadAloudStatus.ERROR, errorMessage = message) }
     }
 
     private fun selectActiveTtsProvider(engineType: TtsEngineType): TtsProvider {
@@ -608,15 +571,19 @@ class ReadAloudCoordinator @Inject constructor(
         return newTrack
     }
 
+    /** Writes [samples] in small slices (so pause / stop react quickly). Returns frames written. */
     private suspend fun writeFloatPcmBlockingWithPauseSupport(
         track: AudioTrack,
         samples: FloatArray
-    ) {
+    ): Long {
         val subChunkFloats = 2400 // 100ms slices @ 24kHz for responsive pause/jump
         var offset = 0
         while (offset < samples.size) {
             while (isPausedFlag.get()) {
                 delay(50L)
+            }
+            kotlinx.coroutines.currentCoroutineContext().let { ctx ->
+                if (ctx[Job]?.isActive == false) return offset.toLong()
             }
             if (track.playState != AudioTrack.PLAYSTATE_PLAYING) {
                 runCatching { track.play() }
@@ -634,6 +601,7 @@ class ReadAloudCoordinator @Inject constructor(
             }
             offset += written
         }
+        return offset.toLong()
     }
 
     private fun stopReadAloudInternal(resetBookState: Boolean) {
@@ -698,8 +666,8 @@ class ReadAloudCoordinator @Inject constructor(
 
     private fun buildCssSelector(element: Element, fallbackIndex: Int): String {
         val id = element.id()
-        if (id.isNotBlank()) return "#$id"
         val tag = element.tagName()
+        if (id.isNotBlank()) return "$tag#$id"
         val siblingIndex = element.elementSiblingIndex() + 1
         return "$tag:nth-child($siblingIndex)"
     }

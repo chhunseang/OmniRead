@@ -1,1776 +1,1409 @@
 package com.example.ui.reader
 
 import android.app.Activity
+import android.view.WindowManager
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.SizeTransform
-import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
-import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideInVertically
-import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.animation.slideOutVertically
-import androidx.compose.animation.togetherWith
-import androidx.compose.foundation.BorderStroke
-import androidx.compose.foundation.Canvas
-import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.combinedClickable
-import androidx.compose.foundation.gestures.detectTapGestures
-import androidx.compose.foundation.gestures.detectVerticalDragGestures
-import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.LazyRow
-import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.FormatAlignLeft
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.MenuBook
-import androidx.compose.material.icons.automirrored.filled.NavigateBefore
-import androidx.compose.material.icons.automirrored.filled.NavigateNext
-import androidx.compose.material.icons.automirrored.filled.VolumeUp
-import androidx.compose.material.icons.filled.Bookmark
-import androidx.compose.material.icons.filled.BookmarkAdd
-import androidx.compose.material.icons.filled.Brightness6
+import androidx.compose.material.icons.automirrored.filled.ViewList
+import androidx.compose.material.icons.filled.AutoStories
 import androidx.compose.material.icons.filled.Close
-import androidx.compose.material.icons.filled.Delete
-import androidx.compose.material.icons.filled.FileDownload
-import androidx.compose.material.icons.filled.FontDownload
-import androidx.compose.material.icons.filled.FormatAlignJustify
-import androidx.compose.material.icons.filled.FormatColorFill
-import androidx.compose.material.icons.filled.FormatSize
-import androidx.compose.material.icons.filled.FormatStrikethrough
-import androidx.compose.material.icons.filled.FormatUnderlined
-import androidx.compose.material.icons.filled.GridOn
+import androidx.compose.material.icons.filled.Headphones
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
-import androidx.compose.material.icons.filled.RecordVoiceOver
-import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.SkipNext
 import androidx.compose.material.icons.filled.SkipPrevious
-import androidx.compose.material.icons.filled.Speed
-import androidx.compose.material.icons.filled.Stop
-import androidx.compose.material.icons.filled.Toc
-import androidx.compose.material3.AssistChip
-import androidx.compose.material3.BottomAppBar
 import androidx.compose.material3.Button
-import androidx.compose.material3.Card
-import androidx.compose.material3.CardDefaults
-import androidx.compose.material3.Checkbox
-import androidx.compose.material3.ElevatedCard
+import androidx.compose.animation.EnterTransition
+import androidx.compose.animation.ExitTransition
+import androidx.compose.animation.core.spring
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.scaleIn
+import androidx.compose.animation.scaleOut
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.windowInsetsPadding
+import androidx.compose.foundation.layout.asPaddingValues
+import androidx.compose.foundation.layout.navigationBarsIgnoringVisibility
+import androidx.compose.foundation.layout.statusBarsIgnoringVisibility
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.layout.LayoutCoordinates
+import androidx.compose.ui.layout.layout
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.material3.FilledTonalIconButton
+import androidx.compose.material3.SegmentedButton
+import androidx.compose.material3.SegmentedButtonDefaults
+import androidx.compose.material3.SingleChoiceSegmentedButtonRow
+import androidx.compose.material3.SliderDefaults
+import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.BrightnessLow
+import androidx.compose.material.icons.filled.Remove
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.layout.ColumnScope
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.ui.draw.scale
+import androidx.compose.ui.unit.DpSize
+import com.example.domain.reader.ReaderTexture
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
-import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedButton
-import androidx.compose.material3.OutlinedCard
-import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.PrimaryTabRow
+import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
+import androidx.compose.material3.Tab
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
-import androidx.compose.material3.TopAppBar
-import androidx.compose.material3.TopAppBarDefaults
+import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.graphicsLayer
-import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.graphics.Shadow
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.font.Font
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
-import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
-import androidx.compose.ui.window.Dialog
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import com.example.data.local.entity.AnnotationStyle
-import com.example.data.local.entity.HighlightEntity
-import com.example.data.local.entity.TtsEngineType
-import com.example.data.reader.ReaderPreferencesRepository
-import com.example.domain.reader.PageTurnMode
-import com.example.domain.reader.ReaderChapterDocument
+import com.example.data.local.entity.BookFormat
 import com.example.domain.reader.ReaderPreferences
 import com.example.domain.reader.ReaderThemePreset
-import com.example.domain.reader.ReaderViewportState
-import com.example.domain.reader.SentenceLocator
-import com.example.domain.reader.TapZoneAction
+import com.example.domain.reader.ReadingMode
+import com.example.domain.reader.TapLayout
 import com.example.domain.tts.LiveTtsReadAloudStatus
 import com.example.domain.tts.LiveTtsSessionState
+import com.example.ui.theme.Literata
+import com.example.ui.components.EDGE_FADE_ALPHA
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+import java.io.File
+import kotlin.math.roundToInt
 
-@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun rememberReaderFontFamily(prefs: ReaderPreferences): FontFamily {
+    return remember(prefs.customFontFamilyName, prefs.customFontFileUri) {
+        val customPath = prefs.customFontFileUri
+        val customName = customPath?.let { File(it).nameWithoutExtension }
+        when {
+            customPath != null && prefs.customFontFamilyName == customName && File(customPath).exists() ->
+                runCatching { FontFamily(Font(File(customPath))) }.getOrDefault(Literata)
+            prefs.customFontFamilyName.equals("Serif", true) -> FontFamily.Serif
+            prefs.customFontFamilyName.equals("Sans", true) -> FontFamily.SansSerif
+            prefs.customFontFamilyName.equals("Mono", true) -> FontFamily.Monospace
+            else -> Literata
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
 fun EbookReaderScreen(
     modifier: Modifier = Modifier,
     viewModel: EbookReaderViewModel = hiltViewModel(),
-    onOpenAudiobookConverter: (() -> Unit)? = null
+    onBackToLibrary: () -> Unit = {}
 ) {
-    val viewportState by viewModel.viewportState.collectAsStateWithLifecycle()
+    val viewport by viewModel.viewportState.collectAsStateWithLifecycle()
     val prefs by viewModel.readerPreferences.collectAsStateWithLifecycle()
-    val ttsState by viewModel.ttsSessionState.collectAsStateWithLifecycle()
-    val activeTtsSentence by viewModel.activeTtsSentence.collectAsStateWithLifecycle()
-    val overlayState by viewModel.overlayState.collectAsStateWithLifecycle()
-
-    val context = LocalContext.current
-    LaunchedEffect(overlayState.screenBrightnessLevel) {
-        (context as? Activity)?.window?.let { win ->
-            val params = win.attributes
-            params.screenBrightness = overlayState.screenBrightnessLevel.coerceIn(0.05f, 1.0f)
-            win.attributes = params
-        }
-    }
-
-    val customFontPicker = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.OpenDocument()
-    ) { uri ->
-        if (uri != null) {
-            val fileName = uri.lastPathSegment?.substringAfterLast('/') ?: "CustomFont.ttf"
-            viewModel.importCustomFontFile(uri.toString(), fileName)
-        }
-    }
+    val tts by viewModel.ttsSessionState.collectAsStateWithLifecycle()
+    val activeSentence by viewModel.activeTtsSentence.collectAsStateWithLifecycle()
+    val ui by viewModel.uiState.collectAsStateWithLifecycle()
 
     val bgColor = Color(prefs.customBackgroundArgb)
     val textColor = Color(prefs.customTextArgb)
+    val fontFamily = rememberReaderFontFamily(prefs)
+    val controller = remember { ReaderPageController() }
+    val scope = rememberCoroutineScope()
+
+    // Reader-only brightness / keep-screen-on, restored when leaving the reader
+    val context = LocalContext.current
+    DisposableEffect(prefs.screenBrightness) {
+        val window = (context as? Activity)?.window
+        window?.let { w -> w.attributes = w.attributes.apply { screenBrightness = prefs.screenBrightness } }
+        onDispose {
+            window?.let { w ->
+                w.attributes = w.attributes.apply { screenBrightness = WindowManager.LayoutParams.BRIGHTNESS_OVERRIDE_NONE }
+            }
+        }
+    }
+    val view = LocalView.current
+    DisposableEffect(prefs.keepScreenOn) {
+        view.keepScreenOn = prefs.keepScreenOn
+        onDispose { view.keepScreenOn = false }
+    }
+    DisposableEffect(Unit) { onDispose { viewModel.onReaderHidden() } }
+
+    // Immersive reading: system bars only appear together with the reader menu
+    DisposableEffect(ui.chromeVisible) {
+        val window = (context as? Activity)?.window
+        val insets = window?.let { androidx.core.view.WindowCompat.getInsetsController(it, view) }
+        insets?.systemBarsBehavior =
+            androidx.core.view.WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+        if (ui.chromeVisible) insets?.show(androidx.core.view.WindowInsetsCompat.Type.systemBars())
+        else insets?.hide(androidx.core.view.WindowInsetsCompat.Type.systemBars())
+        onDispose { insets?.show(androidx.core.view.WindowInsetsCompat.Type.systemBars()) }
+    }
+
+    val fontPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri != null) {
+            val name = uri.lastPathSegment?.substringAfterLast('/')?.substringAfterLast(':') ?: "CustomFont.ttf"
+            viewModel.importCustomFont(uri.toString(), name)
+        }
+    }
+
+    val doc = viewport.activeChapterDocument
+    val chapters = viewport.chapters
+    val chapterIdx = viewport.currentChapterIndex
+    val prevTitle = chapters.getOrNull(chapterIdx - 1)?.title
+    val nextTitle = chapters.getOrNull(chapterIdx + 1)?.title
+    val ttsActive = tts.status != LiveTtsReadAloudStatus.IDLE && tts.status != LiveTtsReadAloudStatus.ERROR
+    val paragraphs = remember(doc) { doc?.let { buildParagraphs(it) }.orEmpty() }
+
+    // PDFs: the slider moves between PDF pages (each PDF page is one "chapter")
+    val isPdfBook = viewport.book?.format == BookFormat.PDF
+    val pdfPageController = remember { ReaderPageController() }
+    pdfPageController.pageCount = chapters.size
+    pdfPageController.currentPage = chapterIdx
+    pdfPageController.jump = { page -> viewModel.loadChapter(page) }
 
     Box(
         modifier = modifier
             .fillMaxSize()
             .background(bgColor)
+            .readerTexture(prefs.backgroundTexture)
+            // The reader is an overlay on top of the library: it must swallow every touch itself
+            // (even while a chapter is still loading) so nothing reaches the books underneath.
+            .pointerInput(Unit) {
+                awaitPointerEventScope {
+                    while (true) awaitPointerEvent(androidx.compose.ui.input.pointer.PointerEventPass.Final)
+                }
+            }
             .testTag("ebook_reader_root")
     ) {
-        // 1. Main Reading Canvas (Paginated or Continuous Scroll) + 9-Zone Tap & Edge Swipe Detectors
-        ReaderContentViewport(
-            viewportState = viewportState,
-            prefs = prefs,
-            activeTtsSentence = activeTtsSentence,
-            showTapGridGuide = overlayState.showTapGridVisualGuide,
-            bgColor = bgColor,
-            textColor = textColor,
-            onTapZone = viewModel::onTapZoneTriggered,
-            onSentenceTapped = viewModel::onSentenceTappedInReader,
-            onSentenceLongPressed = viewModel::openSentenceAnnotationPopup,
-            onLeftEdgeBrightnessDrag = viewModel::adjustBrightnessByDelta,
-            onRightEdgeVolumeDrag = viewModel::adjustVolumeByDelta,
-            onEdgeDragFinished = viewModel::clearGestureHudLabel,
-            onVisibleBoundsChanged = viewModel::updateVisiblePageCharBounds
-        )
+        when {
+            viewport.book == null && !viewport.isLoading -> EmptyReaderState(textColor, onBackToLibrary)
 
-        // 2. Blue-Light Warmth Filter Overlay (Moon+ Reader Eye Protection)
-        if (prefs.blueLightFilterEnabled && prefs.blueLightFilterIntensity > 0f) {
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .background(
-                        Color(0xFFFF8F00).copy(alpha = (prefs.blueLightFilterIntensity * 0.45f).coerceIn(0f, 0.45f))
-                    )
+            doc == null -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                if (viewport.errorMessage != null) {
+                    Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.padding(32.dp)) {
+                        Text(viewport.errorMessage.orEmpty(), color = textColor, textAlign = TextAlign.Center)
+                        Spacer(Modifier.height(16.dp))
+                        OutlinedButton(onClick = onBackToLibrary) { Text("Back to Library") }
+                    }
+                } else {
+                    CircularProgressIndicator(color = textColor.copy(alpha = 0.5f))
+                }
+            }
+
+            prefs.readingMode == ReadingMode.CONTINUOUS || viewport.book?.format == BookFormat.PDF -> ContinuousReader(
+                doc = doc,
+                paragraphs = paragraphs,
+                isPdf = viewport.book?.format == BookFormat.PDF,
+                pdfFileUri = viewport.book?.fileUri,
+                prefs = prefs,
+                fontFamily = fontFamily,
+                textColor = textColor,
+                initialCharOffset = viewport.currentCharOffset,
+                nextChapterTitle = nextTitle,
+                activeSentence = activeSentence,
+                ttsActive = ttsActive,
+                controller = controller,
+                onTapAction = { viewModel.toggleChrome() },
+                onSentenceTap = viewModel::onSentenceTapped,
+                onNextChapter = viewModel::nextChapter,
+                onPreviousChapter = viewModel::previousChapter,
+                onPositionChanged = viewModel::onReadingPositionChanged
+            )
+
+            else -> PagedReader(
+                doc = doc,
+                paragraphs = paragraphs,
+                prefs = prefs,
+                fontFamily = fontFamily,
+                textColor = textColor,
+                initialCharOffset = viewport.currentCharOffset,
+                previousChapterTitle = prevTitle,
+                nextChapterTitle = nextTitle,
+                activeSentence = activeSentence,
+                ttsActive = ttsActive,
+                controller = controller,
+                onTapAction = { viewModel.toggleChrome() },
+                onSentenceTap = viewModel::onSentenceTapped,
+                onGoToNextChapter = viewModel::nextChapter,
+                onGoToPreviousChapterEnd = { if (chapterIdx > 0) viewModel.loadChapterAtEnd(chapterIdx - 1) },
+                onPositionChanged = viewModel::onReadingPositionChanged
             )
         }
 
-        // 3. Edge-Swipe Brightness / Volume HUD Indicator
-        AnimatedVisibility(
-            visible = overlayState.activeGestureHudLabel != null,
-            enter = fadeIn(),
-            exit = fadeOut(),
-            modifier = Modifier.align(Alignment.Center)
-        ) {
-            Surface(
-                color = Color.Black.copy(alpha = 0.78f),
-                shape = RoundedCornerShape(16.dp)
-            ) {
-                Row(
-                    modifier = Modifier.padding(horizontal = 20.dp, vertical = 12.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Icon(
-                        imageVector = if (overlayState.activeGestureHudLabel?.startsWith("Brightness") == true) {
-                            Icons.Default.Brightness6
-                        } else {
-                            Icons.AutoMirrored.Filled.VolumeUp
-                        },
-                        contentDescription = null,
-                        tint = Color(0xFFFFB300)
-                    )
-                    Spacer(modifier = Modifier.width(10.dp))
-                    Text(
-                        text = overlayState.activeGestureHudLabel.orEmpty(),
-                        color = Color.White,
-                        style = MaterialTheme.typography.titleMedium,
-                        fontWeight = FontWeight.Bold
+        // Warm-light filter
+        if (prefs.blueLightFilterEnabled && prefs.blueLightFilterIntensity > 0f) {
+            Box(
+                Modifier
+                    .fillMaxSize()
+                    .background(Color(0xFFFF8F00).copy(alpha = (prefs.blueLightFilterIntensity * 0.45f).coerceIn(0f, 0.4f)))
+            )
+        }
+
+        // Status bar: battery + clock · chapter · page (visible while the menu is hidden)
+        val continuous = prefs.readingMode == ReadingMode.CONTINUOUS
+        val pageText = when {
+            !prefs.showPageNumber || controller.pageCount <= 0 -> ""
+            continuous -> "${((controller.currentPage + 1) * 100 / controller.pageCount).coerceIn(0, 100)}%"
+            else -> "${controller.currentPage + 1} / ${controller.pageCount}"
+        }
+        if (doc != null && !isPdfBook && !ui.chromeVisible) {
+            if (prefs.showStatusBar) {
+                if (continuous) {
+                    // Text scrolls underneath in continuous mode: fade it out behind the bar
+                    Box(
+                        Modifier
+                            .align(Alignment.BottomCenter)
+                            .fillMaxWidth()
+                            .height(40.dp)
+                            .background(androidx.compose.ui.graphics.Brush.verticalGradient(listOf(Color.Transparent, bgColor)))
                     )
                 }
+                ReaderStatusBar(
+                    chapterTitle = chapters.getOrNull(chapterIdx)?.title ?: doc.chapterTitle,
+                    chapterNumber = chapterIdx + 1,
+                    chapterCount = chapters.size,
+                    pageText = pageText,
+                    color = textColor,
+                    background = bgColor,
+                    modifier = Modifier
+                        .align(Alignment.BottomCenter)
+                        .navigationBarsPadding()
+                        .padding(start = prefs.marginLeftDp.dp, end = prefs.marginRightDp.dp, bottom = 6.dp)
+                )
+            } else if (pageText.isNotEmpty() && !continuous) {
+                Text(
+                    pageText,
+                    style = TextStyle(
+                        color = textColor.copy(alpha = 0.7f),
+                        fontSize = MaterialTheme.typography.labelSmall.fontSize,
+                        shadow = Shadow(bgColor, blurRadius = 4f)
+                    ),
+                    modifier = Modifier
+                        .align(Alignment.BottomCenter)
+                        .navigationBarsPadding()
+                        .padding(bottom = 6.dp)
+                )
             }
         }
 
-        // 4. Live TTS Mini Floating Controller Bar when Read-Aloud is active
+        // ---- Chrome: soft scrims behind the system bars, then floating cards ----
+        // While scrubbing pages the rest of the chrome steps aside, so the page itself is visible
+        var scrubbing by remember { mutableStateOf(false) }
+        val chromeShown = ui.chromeVisible && viewport.book != null
+        val scrimColor = MaterialTheme.colorScheme.surfaceContainer
         AnimatedVisibility(
-            visible = ttsState.status != LiveTtsReadAloudStatus.IDLE,
-            enter = slideInVertically { it } + fadeIn(),
-            exit = slideOutVertically { it } + fadeOut(),
-            modifier = Modifier
-                .align(Alignment.BottomCenter)
-                .padding(bottom = if (overlayState.isChromeVisible) 88.dp else 20.dp, start = 16.dp, end = 16.dp)
+            visible = chromeShown && !scrubbing,
+            enter = fadeIn(tween(220)),
+            exit = fadeOut(tween(160)),
+            modifier = Modifier.align(Alignment.TopCenter)
         ) {
-            LiveTtsFloatingBar(
-                ttsState = ttsState,
-                activeSentence = activeTtsSentence,
-                onPlayPause = viewModel::toggleLiveTtsReadAloud,
-                onPreviousSentence = viewModel::skipTtsPreviousSentence,
-                onNextSentence = viewModel::skipTtsNextSentence,
-                onStop = viewModel::stopLiveTtsReadAloud,
-                onOpenTtsSheet = {
-                    viewModel.selectBottomSheetTab(ReaderBottomSheetTab.LIVE_TTS_READ_ALOUD)
-                }
+            Box(
+                Modifier
+                    .fillMaxWidth()
+                    .height(WindowInsets.statusBarsIgnoringVisibility.asPaddingValues().calculateTopPadding() + 104.dp)
+                    // Same edge fade as the rest of the app
+                    .background(
+                        Brush.verticalGradient(
+                            0f to scrimColor.copy(alpha = EDGE_FADE_ALPHA),
+                            1f to scrimColor.copy(alpha = 0f)
+                        )
+                    )
+            )
+        }
+        AnimatedVisibility(
+            visible = chromeShown && !scrubbing,
+            enter = fadeIn(tween(220)),
+            exit = fadeOut(tween(160)),
+            modifier = Modifier.align(Alignment.BottomCenter)
+        ) {
+            Box(
+                Modifier
+                    .fillMaxWidth()
+                    .height(WindowInsets.navigationBarsIgnoringVisibility.asPaddingValues().calculateBottomPadding() + 176.dp)
+                    .background(
+                        Brush.verticalGradient(
+                            0f to scrimColor.copy(alpha = 0f),
+                            1f to scrimColor.copy(alpha = EDGE_FADE_ALPHA)
+                        )
+                    )
             )
         }
 
-        // 5. Top Chrome Toolbar
+        // ---- Top: floating title card ----
         AnimatedVisibility(
-            visible = overlayState.isChromeVisible,
-            enter = slideInVertically { -it } + fadeIn(),
-            exit = slideOutVertically { -it } + fadeOut(),
+            visible = chromeShown && !scrubbing,
+            enter = chromeEnter(fromTop = true),
+            exit = chromeExit(toTop = true),
             modifier = Modifier.align(Alignment.TopCenter)
         ) {
-            TopAppBar(
-                title = {
-                    Column {
+            Surface(
+                color = MaterialTheme.colorScheme.surfaceContainerHigh,
+                contentColor = MaterialTheme.colorScheme.onSurface,
+                shape = RoundedCornerShape(24.dp),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .windowInsetsPadding(WindowInsets.statusBarsIgnoringVisibility)
+                    .padding(horizontal = 12.dp, vertical = 6.dp)
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier.padding(start = 4.dp, end = 16.dp, top = 6.dp, bottom = 6.dp)
+                ) {
+                    IconButton(onClick = onBackToLibrary) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back") }
+                    Column(Modifier.weight(1f)) {
                         Text(
-                            text = viewportState.book?.title ?: "OmniRead eBook Reader",
-                            style = MaterialTheme.typography.titleMedium,
-                            fontWeight = FontWeight.Bold,
+                            viewport.book?.title.orEmpty(),
+                            style = MaterialTheme.typography.titleSmall,
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis
                         )
                         Text(
-                            text = viewportState.activeChapterDocument?.chapterTitle
-                                ?: "Chapter ${viewportState.currentChapterIndex + 1}",
-                            style = MaterialTheme.typography.labelSmall,
+                            doc?.chapterTitle.orEmpty(),
+                            style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis
                         )
                     }
-                },
-                actions = {
-                    IconButton(
-                        onClick = viewModel::toggleTapGridVisualGuide,
-                        modifier = Modifier.testTag("toggle_tap_grid_guide_button")
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.GridOn,
-                            contentDescription = "Toggle 9-Zone Tap Grid Overlay",
-                            tint = if (overlayState.showTapGridVisualGuide) {
-                                MaterialTheme.colorScheme.primary
-                            } else {
-                                MaterialTheme.colorScheme.onSurface
-                            }
+                    if (chapters.size > 1) {
+                        Text(
+                            "${(viewport.overallProgression * 100).roundToInt().coerceIn(0, 100)}%",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
                     }
-                    IconButton(
-                        onClick = { viewModel.addBookmarkAtCurrentViewport() },
-                        modifier = Modifier.testTag("quick_bookmark_button")
-                    ) {
-                        Icon(
-                            imageVector = if (viewportState.chapterBookmarks.isNotEmpty()) {
-                                Icons.Default.Bookmark
-                            } else {
-                                Icons.Default.BookmarkAdd
-                            },
-                            contentDescription = "Bookmark current page"
-                        )
-                    }
-                    if (onOpenAudiobookConverter != null) {
-                        AssistChip(
-                            onClick = onOpenAudiobookConverter,
-                            label = { Text("TTS Studio") },
-                            modifier = Modifier
-                                .padding(end = 8.dp)
-                                .testTag("open_tts_studio_chip")
-                        )
-                    }
-                },
-                colors = TopAppBarDefaults.topAppBarColors(
-                    containerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.95f)
-                )
-            )
+                }
+            }
         }
 
-        // 6. Bottom Chrome Control Bar
-        AnimatedVisibility(
-            visible = overlayState.isChromeVisible,
-            enter = slideInVertically { it } + fadeIn(),
-            exit = slideOutVertically { it } + fadeOut(),
-            modifier = Modifier.align(Alignment.BottomCenter)
+        // ---- Bottom: read-aloud mini player + menu ----
+        Column(
+            Modifier
+                .align(Alignment.BottomCenter)
+                .fillMaxWidth()
         ) {
-            BottomAppBar(
-                containerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.96f),
-                modifier = Modifier.testTag("reader_bottom_bar")
-            ) {
-                IconButton(
-                    onClick = {
-                        viewModel.selectBottomSheetTab(ReaderBottomSheetTab.TOC_AND_BOOKMARKS)
-                    },
-                    modifier = Modifier
-                        .weight(1f)
-                        .testTag("open_toc_sheet_button")
-                ) {
-                    Icon(Icons.Default.Toc, contentDescription = "Table of Contents & Annotations")
-                }
-
-                IconButton(
-                    onClick = {
-                        viewModel.selectBottomSheetTab(ReaderBottomSheetTab.THEMES_AND_TYPOGRAPHY)
-                    },
-                    modifier = Modifier
-                        .weight(1f)
-                        .testTag("open_typography_sheet_button")
-                ) {
-                    Icon(Icons.Default.FormatSize, contentDescription = "Themes & Typography")
-                }
-
-                IconButton(
-                    onClick = {
-                        viewModel.selectBottomSheetTab(ReaderBottomSheetTab.TAP_GRID_AND_GESTURES)
-                    },
-                    modifier = Modifier
-                        .weight(1f)
-                        .testTag("open_gestures_sheet_button")
-                ) {
-                    Icon(Icons.Default.GridOn, contentDescription = "9-Zone Tap Grid & Auto-Scroll")
-                }
-
-                IconButton(
-                    onClick = {
-                        viewModel.selectBottomSheetTab(ReaderBottomSheetTab.SEARCH_IN_BOOK)
-                    },
-                    modifier = Modifier
-                        .weight(1f)
-                        .testTag("open_search_sheet_button")
-                ) {
-                    Icon(Icons.Default.Search, contentDescription = "Full-Text Regex Search")
-                }
-
-                IconButton(
-                    onClick = {
-                        viewModel.selectBottomSheetTab(ReaderBottomSheetTab.LIVE_TTS_READ_ALOUD)
-                    },
-                    modifier = Modifier
-                        .weight(1f)
-                        .testTag("open_tts_sheet_button")
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.RecordVoiceOver,
-                        contentDescription = "Live AI Read-Aloud",
-                        tint = if (ttsState.status != LiveTtsReadAloudStatus.IDLE) {
-                            MaterialTheme.colorScheme.primary
-                        } else {
-                            MaterialTheme.colorScheme.onSurface
-                        }
-                    )
-                }
-            }
-        }
-
-        // 7. Multi-Color Highlight / Underline / Note & Dictionary Popup Dialog
-        overlayState.pendingAnnotation?.let { pending ->
-            SentenceAnnotationDialog(
-                pending = pending,
-                onDismiss = viewModel::dismissSentenceAnnotationPopup,
-                onUpdateDraft = viewModel::updatePendingAnnotationDraft,
-                onSaveAnnotation = viewModel::savePendingHighlightAndNote,
-                onStartReadAloudFromHere = { viewModel.startTtsFromSentence(pending.sentenceLocator) },
-                onLookupWord = viewModel::lookupWordInPendingPopup
-            )
-        }
-
-        // 8. Customization & Navigation Modal Bottom Sheet
-        if (overlayState.activeBottomSheetTab != ReaderBottomSheetTab.NONE) {
-            ModalBottomSheet(
-                onDismissRequest = {
-                    viewModel.selectBottomSheetTab(ReaderBottomSheetTab.NONE)
-                }
-            ) {
-                when (overlayState.activeBottomSheetTab) {
-                    ReaderBottomSheetTab.TOC_AND_BOOKMARKS -> TocAndAnnotationsSheet(
-                        viewportState = viewportState,
-                        exportedJsonPreview = overlayState.exportedAnnotationsJsonPreview,
-                        onSelectChapter = { idx ->
-                            viewModel.loadChapter(idx)
-                            viewModel.selectBottomSheetTab(ReaderBottomSheetTab.NONE)
-                        },
-                        onDeleteHighlight = viewModel::deleteHighlight,
-                        onDeleteBookmark = viewModel::deleteBookmark,
-                        onExportAnnotations = viewModel::exportAllBookAnnotations
-                    )
-
-                    ReaderBottomSheetTab.THEMES_AND_TYPOGRAPHY -> ThemesAndTypographySheet(
-                        prefs = prefs,
-                        onSelectTheme = viewModel::selectThemePreset,
-                        onBlueLightFilterChange = viewModel::setBlueLightFilter,
-                        onUpdateTypography = viewModel::updateTypography,
-                        onUpdateMargins = viewModel::updatePageMargins,
-                        onImportCustomFont = {
-                            customFontPicker.launch(arrayOf("font/ttf", "font/otf", "application/octet-stream"))
-                        }
-                    )
-
-                    ReaderBottomSheetTab.TAP_GRID_AND_GESTURES -> TapGridAndPageTurnSheet(
-                        prefs = prefs,
-                        onSelectPageTurnMode = viewModel::setPageTurnMode,
-                        onSetAutoScroll = viewModel::setAutoScroll,
-                        onUpdateTapZone = viewModel::updateTapZoneCell
-                    )
-
-                    ReaderBottomSheetTab.SEARCH_IN_BOOK -> InBookRegexSearchSheet(
-                        query = overlayState.searchQuery,
-                        useRegex = overlayState.searchUseRegex,
-                        caseSensitive = overlayState.searchCaseSensitive,
-                        results = overlayState.searchResults,
-                        onQueryChanged = viewModel::updateSearchQuery,
-                        onSelectMatch = viewModel::jumpToSearchResult
-                    )
-
-                    ReaderBottomSheetTab.LIVE_TTS_READ_ALOUD -> LiveTtsReadAloudSheet(
-                        ttsState = ttsState,
-                        availableVoices = overlayState.availableVoices,
-                        onTogglePlayPause = viewModel::toggleLiveTtsReadAloud,
-                        onStop = viewModel::stopLiveTtsReadAloud,
-                        onSelectVoice = viewModel::setTtsVoiceAndEngine,
-                        onSpeedChange = viewModel::setTtsSpeed
-                    )
-
-                    ReaderBottomSheetTab.NONE -> Unit
-                }
-            }
-        }
-    }
-}
-
-@OptIn(ExperimentalFoundationApi::class)
-@Composable
-private fun ReaderContentViewport(
-    viewportState: ReaderViewportState,
-    prefs: ReaderPreferences,
-    activeTtsSentence: SentenceLocator?,
-    showTapGridGuide: Boolean,
-    bgColor: Color,
-    textColor: Color,
-    onTapZone: (Int, Int) -> Unit,
-    onSentenceTapped: (SentenceLocator) -> Unit,
-    onSentenceLongPressed: (SentenceLocator) -> Unit,
-    onLeftEdgeBrightnessDrag: (Float) -> Unit,
-    onRightEdgeVolumeDrag: (Float) -> Unit,
-    onEdgeDragFinished: () -> Unit,
-    onVisibleBoundsChanged: (Int, Int) -> Unit
-) {
-    val doc = viewportState.activeChapterDocument
-    val fontFamily = remember(prefs.customFontFamilyName) {
-        when (prefs.customFontFamilyName.lowercase()) {
-            "sansserif" -> FontFamily.SansSerif
-            "monospace" -> FontFamily.Monospace
-            "cursive" -> FontFamily.Cursive
-            else -> FontFamily.Serif
-        }
-    }
-
-    BoxWithConstraints(
-        modifier = Modifier
-            .fillMaxSize()
-            // 9-Zone Screen Tap Detector
-            .pointerInput(prefs.tapZoneGrid) {
-                detectTapGestures { offset ->
-                    val col = ((offset.x / size.width.coerceAtLeast(1)) * 3f).toInt().coerceIn(0, 2)
-                    val row = ((offset.y / size.height.coerceAtLeast(1)) * 3f).toInt().coerceIn(0, 2)
-                    onTapZone(row, col)
-                }
-            }
-            // Left & Right Edge Vertical Swipe Gestures for Brightness & Volume
-            .pointerInput(prefs.leftEdgeBrightnessSwipe, prefs.rightEdgeVolumeSwipe) {
-                var activeEdge: Int = 0 // -1 = left (brightness), +1 = right (volume), 0 = none
-                detectVerticalDragGestures(
-                    onDragStart = { startOffset ->
-                        val edgeZonePx = size.width * 0.14f
-                        activeEdge = when {
-                            startOffset.x <= edgeZonePx -> -1
-                            startOffset.x >= size.width - edgeZonePx -> 1
-                            else -> 0
-                        }
-                    },
-                    onVerticalDrag = { change, dragAmount ->
-                        if (activeEdge != 0) {
-                            change.consume()
-                            val deltaFraction = -dragAmount / size.height.coerceAtLeast(1).toFloat()
-                            if (activeEdge == -1) {
-                                onLeftEdgeBrightnessDrag(deltaFraction)
-                            } else if (activeEdge == 1) {
-                                onRightEdgeVolumeDrag(deltaFraction)
-                            }
-                        }
-                    },
-                    onDragEnd = {
-                        activeEdge = 0
-                        onEdgeDragFinished()
-                    },
-                    onDragCancel = {
-                        activeEdge = 0
-                        onEdgeDragFinished()
-                    }
+            AnimatedVisibility(visible = tts.status != LiveTtsReadAloudStatus.IDLE) {
+                ReadAloudBar(
+                    tts = tts,
+                    onPlayPause = viewModel::toggleReadAloud,
+                    onPrevious = viewModel::skipToPreviousSentence,
+                    onNext = viewModel::skipToNextSentence,
+                    onStop = viewModel::stopReadAloud,
+                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp)
+                        .let { if (ui.chromeVisible) it else it.navigationBarsPadding() }
                 )
             }
-    ) {
-        if (doc == null) {
-            Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                Text(
-                    text = viewportState.errorMessage ?: "Loading publication...",
-                    color = textColor,
-                    style = MaterialTheme.typography.bodyLarge
+            AnimatedVisibility(
+                visible = chromeShown,
+                enter = chromeEnter(fromTop = false),
+                exit = chromeExit(toTop = false)
+            ) {
+                ReaderBottomMenu(
+                    prefs = prefs,
+                    chapterIndex = chapterIdx,
+                    chapterCount = chapters.size,
+                    controller = if (isPdfBook) pdfPageController else controller,
+                    readAloudPlaying = tts.status == LiveTtsReadAloudStatus.PLAYING,
+                    onPreviousChapter = viewModel::previousChapter,
+                    onNextChapter = viewModel::nextChapter,
+                    onSeekPage = { page -> scope.launch { controller.goTo(page) } },
+                    // Paged / scroll modes follow the finger live; PDFs jump when you let go
+                    onScrub = if (isPdfBook) null else { page -> scope.launch { controller.snapTo(page) } },
+                    onScrubbingChange = { scrubbing = it },
+                    onContents = { viewModel.showSheet(ReaderSheet.CONTENTS) },
+                    onReadingMode = viewModel::setReadingMode,
+                    onReadAloud = viewModel::toggleReadAloud,
+                    onSettings = { viewModel.showSheet(ReaderSheet.SETTINGS) }
                 )
             }
-            return@BoxWithConstraints
         }
 
-        if (prefs.pageTurnMode == PageTurnMode.VERTICAL_CONTINUOUS) {
-            val listState = rememberLazyListState()
-
-            // Continuous Auto-Scroll loop
-            LaunchedEffect(prefs.autoScrollEnabled, prefs.autoScrollSpeedPixelsPerSec) {
-                while (prefs.autoScrollEnabled) {
-                    listState.scrollBy(prefs.autoScrollSpeedPixelsPerSec * 0.032f)
-                    delay(32L)
-                }
+        ui.message?.let { msg ->
+            LaunchedEffect(msg) {
+                delay(2500)
+                viewModel.dismissMessage()
             }
-
-            // Auto-scroll to active TTS sentence when playing
-            LaunchedEffect(activeTtsSentence?.sentenceIndex) {
-                val targetSentence = activeTtsSentence ?: return@LaunchedEffect
-                if (targetSentence.chapterIndex == doc.chapterIndex) {
-                    val itemIdx = targetSentence.sentenceIndex.coerceIn(0, maxOf(0, doc.sentences.size - 1))
-                    listState.animateScrollToItem(itemIdx)
-                }
-            }
-
-            LazyColumn(
-                state = listState,
-                contentPadding = PaddingValues(
-                    start = prefs.marginLeftDp.dp,
-                    end = prefs.marginRightDp.dp,
-                    top = (prefs.marginTopDp + 48f).dp,
-                    bottom = (prefs.marginBottomDp + 96f).dp
-                ),
-                verticalArrangement = Arrangement.spacedBy(prefs.paragraphSpacingDp.dp),
-                modifier = Modifier
-                    .fillMaxSize()
-                    .testTag("continuous_reader_lazy_column")
-            ) {
-                item {
-                    Text(
-                        text = doc.chapterTitle,
-                        color = textColor,
-                        fontFamily = fontFamily,
-                        fontSize = (prefs.fontSizeSp + 5f).sp,
-                        fontWeight = FontWeight.Bold,
-                        modifier = Modifier.padding(bottom = 12.dp)
-                    )
-                }
-
-                items(
-                    items = doc.sentences,
-                    key = { it.sentenceId }
-                ) { sentence ->
-                    SentenceBlockItem(
-                        sentence = sentence,
-                        isActiveTtsSentence = activeTtsSentence?.sentenceId == sentence.sentenceId,
-                        highlights = viewportState.chapterHighlights,
-                        prefs = prefs,
-                        fontFamily = fontFamily,
-                        textColor = textColor,
-                        onTap = { onSentenceTapped(sentence) },
-                        onLongPress = { onSentenceLongPressed(sentence) }
-                    )
-                }
-            }
-        } else {
-            // Paginated viewport (CURL_FLIP, SLIDE, or FADE)
-            val totalSentences = doc.sentences.size.coerceAtLeast(1)
-            val totalPages = viewportState.totalPagesInChapter.coerceAtLeast(1)
-            val currentPage = viewportState.currentPageInChapter.coerceIn(0, totalPages - 1)
-            val sentencesPerPage = maxOf(1, (totalSentences + totalPages - 1) / totalPages)
-            val startIdx = (currentPage * sentencesPerPage).coerceIn(0, totalSentences - 1)
-            val endIdx = minOf(totalSentences, startIdx + sentencesPerPage)
-            val pageSentences = doc.sentences.subList(startIdx, endIdx)
-
-            LaunchedEffect(currentPage, pageSentences) {
-                val minChar = pageSentences.firstOrNull()?.startCharOffset ?: 0
-                val maxChar = pageSentences.lastOrNull()?.endCharOffset ?: Int.MAX_VALUE
-                onVisibleBoundsChanged(minChar, maxChar)
-            }
-
-            AnimatedContent(
-                targetState = Triple(doc.chapterIndex, currentPage, pageSentences),
-                transitionSpec = {
-                    val forward = targetState.first > initialState.first ||
-                        (targetState.first == initialState.first && targetState.second >= initialState.second)
-                    when (prefs.pageTurnMode) {
-                        PageTurnMode.CURL_FLIP, PageTurnMode.SLIDE -> {
-                            val enterOffset: (Int) -> Int = { fullWidth -> if (forward) fullWidth else -fullWidth }
-                            val exitOffset: (Int) -> Int = { fullWidth -> if (forward) -fullWidth / 3 else fullWidth / 3 }
-                            (slideInHorizontally(tween(320), enterOffset) + fadeIn(tween(240)))
-                                .togetherWith(slideOutHorizontally(tween(320), exitOffset) + fadeOut(tween(200)))
-                        }
-                        else -> {
-                            fadeIn(tween(240)).togetherWith(fadeOut(tween(240)))
-                        }
-                    }.using(SizeTransform(clip = false))
-                },
-                label = "PaginatedPageTurnAnimation"
-            ) { (chapterIdx, pageNum, visibleSentences) ->
-                Box(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .padding(
-                            start = prefs.marginLeftDp.dp,
-                            end = prefs.marginRightDp.dp,
-                            top = (prefs.marginTopDp + 48f).dp,
-                            bottom = (prefs.marginBottomDp + 72f).dp
-                        )
-                ) {
-                    LazyColumn(
-                        verticalArrangement = Arrangement.spacedBy(prefs.paragraphSpacingDp.dp),
-                        modifier = Modifier.fillMaxSize()
-                    ) {
-                        if (pageNum == 0) {
-                            item {
-                                Text(
-                                    text = doc.chapterTitle,
-                                    color = textColor,
-                                    fontFamily = fontFamily,
-                                    fontSize = (prefs.fontSizeSp + 5f).sp,
-                                    fontWeight = FontWeight.Bold,
-                                    modifier = Modifier.padding(bottom = 8.dp)
-                                )
-                            }
-                        }
-
-                        items(
-                            items = visibleSentences,
-                            key = { it.sentenceId }
-                        ) { sentence ->
-                            SentenceBlockItem(
-                                sentence = sentence,
-                                isActiveTtsSentence = activeTtsSentence?.sentenceId == sentence.sentenceId,
-                                highlights = viewportState.chapterHighlights,
-                                prefs = prefs,
-                                fontFamily = fontFamily,
-                                textColor = textColor,
-                                onTap = { onSentenceTapped(sentence) },
-                                onLongPress = { onSentenceLongPressed(sentence) }
-                            )
-                        }
-                    }
-
-                    // Subtle Curl Spine Shadow when CURL_FLIP mode is active
-                    if (prefs.pageTurnMode == PageTurnMode.CURL_FLIP) {
-                        Box(
-                            modifier = Modifier
-                                .align(Alignment.CenterEnd)
-                                .fillMaxHeight()
-                                .width(14.dp)
-                                .background(
-                                    Brush.horizontalGradient(
-                                        colors = listOf(
-                                            Color.Transparent,
-                                            Color.Black.copy(alpha = 0.08f)
-                                        )
-                                    )
-                                )
-                        )
-                    }
-
-                    // Page Footer Status Bar (Chapter, Page X/Y, Overall %)
-                    Row(
-                        modifier = Modifier
-                            .align(Alignment.BottomCenter)
-                            .fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween
-                    ) {
-                        Text(
-                            text = "Ch ${chapterIdx + 1}/${viewportState.chapters.size} • ${doc.chapterTitle}",
-                            color = textColor.copy(alpha = 0.65f),
-                            style = MaterialTheme.typography.labelSmall,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                            modifier = Modifier.weight(1f)
-                        )
-                        Text(
-                            text = "Page ${pageNum + 1}/${viewportState.totalPagesInChapter} • ${(viewportState.overallProgression * 100).toInt()}%",
-                            color = textColor.copy(alpha = 0.75f),
-                            style = MaterialTheme.typography.labelSmall,
-                            fontWeight = FontWeight.SemiBold
-                        )
-                    }
-                }
-            }
-        }
-
-        // Visual 9-Zone Tap Grid Guide Overlay when toggled on
-        if (showTapGridGuide) {
-            TapZoneGridOverlayGuide(prefs = prefs)
-        }
-    }
-}
-
-@OptIn(ExperimentalFoundationApi::class)
-@Composable
-private fun SentenceBlockItem(
-    sentence: SentenceLocator,
-    isActiveTtsSentence: Boolean,
-    highlights: List<HighlightEntity>,
-    prefs: ReaderPreferences,
-    fontFamily: FontFamily,
-    textColor: Color,
-    onTap: () -> Unit,
-    onLongPress: () -> Unit
-) {
-    val matchingHighlight = highlights.firstOrNull { h ->
-        h.startCharOffset < sentence.endCharOffset && h.endCharOffset > sentence.startCharOffset
-    }
-
-    val backgroundHighlightColor = when {
-        isActiveTtsSentence -> Color(0xFFFFC107).copy(alpha = 0.36f)
-        matchingHighlight != null && matchingHighlight.style == AnnotationStyle.HIGHLIGHT ->
-            Color(matchingHighlight.colorArgb).copy(alpha = 0.38f)
-        else -> Color.Transparent
-    }
-
-    val textDecoration = when (matchingHighlight?.style) {
-        AnnotationStyle.UNDERLINE -> TextDecoration.Underline
-        AnnotationStyle.STRIKETHROUGH -> TextDecoration.LineThrough
-        else -> TextDecoration.None
-    }
-
-    Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clip(RoundedCornerShape(6.dp))
-            .background(backgroundHighlightColor)
-            .border(
-                width = if (isActiveTtsSentence) 1.5.dp else 0.dp,
-                color = if (isActiveTtsSentence) Color(0xFFFFA000) else Color.Transparent,
-                shape = RoundedCornerShape(6.dp)
-            )
-            .combinedClickable(
-                onClick = onTap,
-                onLongClick = onLongPress
-            )
-            .padding(horizontal = 6.dp, vertical = 4.dp)
-            .testTag("reader_sentence_${sentence.sentenceIndex}")
-    ) {
-        Text(
-            text = sentence.text,
-            color = textColor,
-            fontFamily = fontFamily,
-            fontSize = prefs.fontSizeSp.sp,
-            fontWeight = FontWeight(prefs.fontWeight.coerceIn(300, 800)),
-            lineHeight = (prefs.fontSizeSp * prefs.lineSpacingMultiplier).sp,
-            letterSpacing = (prefs.wordSpacingSp * 0.15f).sp,
-            textAlign = if (prefs.fullJustification) TextAlign.Justify else TextAlign.Start,
-            textDecoration = textDecoration
-        )
-
-        if (!matchingHighlight?.noteMarkdown.isNullOrBlank()) {
             Surface(
-                color = Color(matchingHighlight?.colorArgb ?: 0xFFFFEB3B).copy(alpha = 0.25f),
-                shape = RoundedCornerShape(6.dp),
+                color = MaterialTheme.colorScheme.inverseSurface,
+                shape = RoundedCornerShape(12.dp),
                 modifier = Modifier
-                    .padding(top = 4.dp)
-                    .fillMaxWidth()
+                    .align(Alignment.Center)
+                    .padding(24.dp)
             ) {
                 Text(
-                    text = "📝 ${matchingHighlight?.noteMarkdown}",
-                    color = textColor.copy(alpha = 0.9f),
-                    style = MaterialTheme.typography.labelMedium,
-                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+                    msg,
+                    color = MaterialTheme.colorScheme.inverseOnSurface,
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp)
                 )
+            }
+        }
+    }
+
+    if (ui.sheet != ReaderSheet.NONE) {
+        ModalBottomSheet(
+            onDismissRequest = { viewModel.showSheet(ReaderSheet.NONE) },
+            sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
+            containerColor = MaterialTheme.colorScheme.surfaceContainerLow,
+            // Settings keep the page visible behind a light scrim, so changes show live
+            scrimColor = if (ui.sheet == ReaderSheet.SETTINGS) Color.Black.copy(alpha = 0.12f)
+            else androidx.compose.material3.BottomSheetDefaults.ScrimColor
+        ) {
+            when (ui.sheet) {
+                ReaderSheet.CONTENTS -> ContentsSheet(
+                    chapterTitles = chapters.map { it.title },
+                    currentIndex = chapterIdx,
+                    onSelect = viewModel::loadChapter
+                )
+                ReaderSheet.SETTINGS -> ReaderSettingsSheet(
+                    prefs = prefs,
+                    viewModel = viewModel,
+                    onImportFont = {
+                        fontPicker.launch(arrayOf("font/ttf", "font/otf", "font/*", "application/x-font-ttf", "application/octet-stream"))
+                    }
+                )
+                ReaderSheet.NONE -> Unit
             }
         }
     }
 }
 
+// ---------------------------------------------------------------------------------------------
+// Reader chrome: a floating title card on top and one floating control card at the bottom
+// ([◀ chapter] page slider [chapter ▶] over a row of labelled actions).
+// ---------------------------------------------------------------------------------------------
+
+/** Cards glide a short distance and fade in; the bottom card trails the top one slightly. */
+private fun chromeEnter(fromTop: Boolean): EnterTransition {
+    val delay = if (fromTop) 0 else 40
+    return fadeIn(tween(durationMillis = 200, delayMillis = delay)) +
+        slideInVertically(spring(dampingRatio = 0.9f, stiffness = 520f)) { h -> if (fromTop) -h / 2 else h / 3 }
+}
+
+private fun chromeExit(toTop: Boolean): ExitTransition =
+    fadeOut(tween(140)) +
+        slideOutVertically(tween(160)) { h -> if (toTop) -h / 3 else h / 4 }
+
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun TapZoneGridOverlayGuide(prefs: ReaderPreferences) {
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(Color.Black.copy(alpha = 0.25f))
+private fun ReaderBottomMenu(
+    prefs: ReaderPreferences,
+    chapterIndex: Int,
+    chapterCount: Int,
+    controller: ReaderPageController,
+    readAloudPlaying: Boolean,
+    onPreviousChapter: () -> Unit,
+    onNextChapter: () -> Unit,
+    onSeekPage: (Int) -> Unit,
+    onScrub: ((Int) -> Unit)?,
+    onScrubbingChange: (Boolean) -> Unit,
+    onContents: () -> Unit,
+    onReadingMode: (ReadingMode) -> Unit,
+    onReadAloud: () -> Unit,
+    onSettings: () -> Unit
+) {
+    val rtl = prefs.readingMode == ReadingMode.PAGED_RTL
+    val density = LocalDensity.current
+    val count = controller.pageCount.coerceAtLeast(1)
+    var dragValue by remember { mutableStateOf<Float?>(null) }
+    val shown = dragValue ?: controller.currentPage.toFloat()
+    // Where the slider sits inside the panel, for the floating "page" bubble while dragging
+    var panelCoords by remember { mutableStateOf<LayoutCoordinates?>(null) }
+    var sliderBounds by remember { mutableStateOf<androidx.compose.ui.geometry.Rect?>(null) }
+    val view = LocalView.current
+    var lastScrubPage by remember { mutableIntStateOf(-1) }
+    // One tick per page, thinned out for very long chapters so it stays a texture, not a buzz
+    val tickStep = kotlin.math.ceil(count / 60f).toInt().coerceAtLeast(1)
+    val tickConstant = if (android.os.Build.VERSION.SDK_INT >= 34) {
+        android.view.HapticFeedbackConstants.SEGMENT_FREQUENT_TICK
+    } else {
+        android.view.HapticFeedbackConstants.CLOCK_TICK
+    }
+
+    Box(
+        Modifier
+            .fillMaxWidth()
+            .navigationBarsPadding()
+            .padding(horizontal = 12.dp)
+            .padding(bottom = 8.dp)
+            .onGloballyPositioned { panelCoords = it }
     ) {
-        for (row in 0..2) {
-            Row(
-                modifier = Modifier
-                    .weight(1f)
-                    .fillMaxWidth()
-            ) {
-                for (col in 0..2) {
-                    val action = prefs.tapZoneGrid.actionForZone(row, col)
-                    Box(
-                        contentAlignment = Alignment.Center,
+        Surface(
+            color = MaterialTheme.colorScheme.surfaceContainerHigh,
+            contentColor = MaterialTheme.colorScheme.onSurface,
+            shape = RoundedCornerShape(28.dp),
+            shadowElevation = 0.dp,
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Column(Modifier.padding(horizontal = 6.dp, vertical = 6.dp)) {
+                // Row 1: chapter skip · page slider · chapter skip
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    val (leftEnabled, leftAction) = if (rtl) (chapterIndex + 1 < chapterCount) to onNextChapter
+                    else (chapterIndex > 0) to onPreviousChapter
+                    val (rightEnabled, rightAction) = if (rtl) (chapterIndex > 0) to onPreviousChapter
+                    else (chapterIndex + 1 < chapterCount) to onNextChapter
+
+                    IconButton(onClick = leftAction, enabled = leftEnabled) {
+                        Icon(Icons.Default.SkipPrevious, if (rtl) "Next chapter" else "Previous chapter", Modifier.size(22.dp))
+                    }
+                    val left = if (rtl) "$count" else "${shown.roundToInt() + 1}"
+                    val right = if (rtl) "${shown.roundToInt() + 1}" else "$count"
+                    Text(
+                        left,
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        textAlign = TextAlign.Center,
+                        modifier = Modifier.width(28.dp)
+                    )
+                    CompactSlider(
+                        value = if (rtl) (count - 1 - shown) else shown,
+                        range = 0f..(count - 1).coerceAtLeast(1).toFloat(),
+                        onChange = { v ->
+                            val value = if (rtl) (count - 1 - v) else v
+                            if (dragValue == null) {
+                                lastScrubPage = controller.currentPage
+                                onScrubbingChange(true)
+                            }
+                            dragValue = value
+                            val page = value.roundToInt().coerceIn(0, count - 1)
+                            if (page != lastScrubPage) {
+                                if (page / tickStep != lastScrubPage / tickStep) view.performHapticFeedback(tickConstant)
+                                lastScrubPage = page
+                                onScrub?.invoke(page)
+                            }
+                        },
+                        onChangeFinished = {
+                            dragValue?.let { v ->
+                                val page = v.roundToInt().coerceIn(0, count - 1)
+                                if (onScrub == null) onSeekPage(page) else onScrub(page)
+                            }
+                            dragValue = null
+                            onScrubbingChange(false)
+                        },
+                        enabled = count > 1,
                         modifier = Modifier
                             .weight(1f)
-                            .fillMaxHeight()
-                            .border(1.dp, Color.White.copy(alpha = 0.55f))
-                    ) {
-                        Surface(
-                            color = Color.Black.copy(alpha = 0.68f),
-                            shape = RoundedCornerShape(8.dp)
-                        ) {
-                            Text(
-                                text = "Zone (${row + 1},${col + 1})\n${action.name.replace('_', ' ')}",
-                                color = Color.White,
-                                style = MaterialTheme.typography.labelSmall,
-                                textAlign = TextAlign.Center,
-                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp)
-                            )
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun LiveTtsFloatingBar(
-    ttsState: LiveTtsSessionState,
-    activeSentence: SentenceLocator?,
-    onPlayPause: () -> Unit,
-    onPreviousSentence: () -> Unit,
-    onNextSentence: () -> Unit,
-    onStop: () -> Unit,
-    onOpenTtsSheet: () -> Unit
-) {
-    ElevatedCard(
-        shape = RoundedCornerShape(20.dp),
-        colors = CardDefaults.elevatedCardColors(
-            containerColor = MaterialTheme.colorScheme.primaryContainer
-        ),
-        modifier = Modifier
-            .fillMaxWidth()
-            .testTag("live_tts_floating_bar")
-    ) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .clickable { onOpenTtsSheet() }
-                .padding(horizontal = 14.dp, vertical = 10.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Column(modifier = Modifier.weight(1f)) {
-                Text(
-                    text = "AI Read-Aloud (${ttsState.activeVoiceId} • ${"%.2f".format(ttsState.playbackSpeed)}x)",
-                    style = MaterialTheme.typography.labelMedium,
-                    fontWeight = FontWeight.Bold,
-                    color = MaterialTheme.colorScheme.onPrimaryContainer
-                )
-                Text(
-                    text = activeSentence?.text ?: "Pre-buffering 24kHz neural sentences...",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.85f),
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
-                )
-            }
-
-            IconButton(onClick = onPreviousSentence) {
-                Icon(Icons.Default.SkipPrevious, contentDescription = "Previous sentence")
-            }
-            IconButton(
-                onClick = onPlayPause,
-                modifier = Modifier.testTag("live_tts_play_pause_button")
-            ) {
-                Icon(
-                    imageVector = if (ttsState.status == LiveTtsReadAloudStatus.PLAYING ||
-                        ttsState.status == LiveTtsReadAloudStatus.PRE_BUFFERING
-                    ) {
-                        Icons.Default.Pause
-                    } else {
-                        Icons.Default.PlayArrow
-                    },
-                    contentDescription = "Play or Pause Read-Aloud"
-                )
-            }
-            IconButton(onClick = onNextSentence) {
-                Icon(Icons.Default.SkipNext, contentDescription = "Next sentence")
-            }
-            IconButton(onClick = onStop) {
-                Icon(Icons.Default.Stop, contentDescription = "Stop Read-Aloud")
-            }
-        }
-    }
-}
-
-@Composable
-private fun SentenceAnnotationDialog(
-    pending: PendingSentenceAnnotationState,
-    onDismiss: () -> Unit,
-    onUpdateDraft: (Long?, AnnotationStyle?, String?) -> Unit,
-    onSaveAnnotation: () -> Unit,
-    onStartReadAloudFromHere: () -> Unit,
-    onLookupWord: (String) -> Unit
-) {
-    val paletteColors = listOf(
-        0xFFFFEB3B to "Yellow",
-        0xFF81C784 to "Mint",
-        0xFF64B5F6 to "Sky",
-        0xFFF06292 to "Rose",
-        0xFFBA68C8 to "Violet"
-    )
-    var lookupWordInput by remember {
-        mutableStateOf(
-            pending.sentenceLocator.text.trim().split(Regex("\\s+")).firstOrNull().orEmpty()
-        )
-    }
-
-    Dialog(onDismissRequest = onDismiss) {
-        Card(
-            shape = RoundedCornerShape(20.dp),
-            modifier = Modifier
-                .fillMaxWidth()
-                .testTag("sentence_annotation_dialog")
-        ) {
-            Column(
-                modifier = Modifier.padding(18.dp),
-                verticalArrangement = Arrangement.spacedBy(12.dp)
-            ) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
+                            .padding(horizontal = 6.dp)
+                            .onGloballyPositioned { coords ->
+                                sliderBounds = panelCoords?.takeIf { it.isAttached }?.localBoundingBoxOf(coords)
+                            }
+                    )
                     Text(
-                        text = "Highlight, Note & Dictionary",
-                        style = MaterialTheme.typography.titleMedium,
-                        fontWeight = FontWeight.Bold
+                        right,
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        textAlign = TextAlign.Center,
+                        modifier = Modifier.width(28.dp)
                     )
-                    IconButton(onClick = onDismiss) {
-                        Icon(Icons.Default.Close, contentDescription = "Close")
+                    IconButton(onClick = rightAction, enabled = rightEnabled) {
+                        Icon(Icons.Default.SkipNext, if (rtl) "Previous chapter" else "Next chapter", Modifier.size(22.dp))
                     }
                 }
 
-                Text(
-                    text = "“${pending.sentenceLocator.text}”",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    maxLines = 3,
-                    overflow = TextOverflow.Ellipsis
-                )
-
-                // Multi-color Highlight Swatches
-                Row(
-                    horizontalArrangement = Arrangement.spacedBy(10.dp),
-                    verticalAlignment = Alignment.CenterVertically
+                // Row 2: labelled actions (tucked away while scrubbing)
+                AnimatedVisibility(
+                    visible = dragValue == null,
+                    enter = fadeIn(tween(180)) + androidx.compose.animation.expandVertically(tween(220)),
+                    exit = fadeOut(tween(120)) + androidx.compose.animation.shrinkVertically(tween(200))
                 ) {
-                    paletteColors.forEach { (argb, label) ->
-                        val selected = pending.selectedColorArgb == argb
-                        Box(
-                            modifier = Modifier
-                                .size(34.dp)
-                                .clip(CircleShape)
-                                .background(Color(argb))
-                                .border(
-                                    width = if (selected) 3.dp else 1.dp,
-                                    color = if (selected) MaterialTheme.colorScheme.primary else Color.Gray,
-                                    shape = CircleShape
-                                )
-                                .clickable { onUpdateDraft(argb, null, null) }
-                                .testTag("highlight_color_$label")
-                        )
-                    }
-                }
-
-                // Style Chips (Highlight, Underline, Strikethrough)
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    FilterChip(
-                        selected = pending.selectedStyle == AnnotationStyle.HIGHLIGHT,
-                        onClick = { onUpdateDraft(null, AnnotationStyle.HIGHLIGHT, null) },
-                        label = { Text("Highlight") },
-                        leadingIcon = { Icon(Icons.Default.FormatColorFill, contentDescription = null, modifier = Modifier.size(16.dp)) }
-                    )
-                    FilterChip(
-                        selected = pending.selectedStyle == AnnotationStyle.UNDERLINE,
-                        onClick = { onUpdateDraft(null, AnnotationStyle.UNDERLINE, null) },
-                        label = { Text("Underline") },
-                        leadingIcon = { Icon(Icons.Default.FormatUnderlined, contentDescription = null, modifier = Modifier.size(16.dp)) }
-                    )
-                    FilterChip(
-                        selected = pending.selectedStyle == AnnotationStyle.STRIKETHROUGH,
-                        onClick = { onUpdateDraft(null, AnnotationStyle.STRIKETHROUGH, null) },
-                        label = { Text("Strike") },
-                        leadingIcon = { Icon(Icons.Default.FormatStrikethrough, contentDescription = null, modifier = Modifier.size(16.dp)) }
-                    )
-                }
-
-                OutlinedTextField(
-                    value = pending.noteMarkdown,
-                    onValueChange = { onUpdateDraft(null, null, it) },
-                    label = { Text("Attach Markdown Study Note") },
-                    maxLines = 3,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .testTag("annotation_note_input")
-                )
-
-                HorizontalDivider()
-
-                // Dictionary Lookup Card
                 Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    horizontalArrangement = Arrangement.SpaceEvenly,
+                    modifier = Modifier.fillMaxWidth()
                 ) {
-                    OutlinedTextField(
-                        value = lookupWordInput,
-                        onValueChange = { lookupWordInput = it },
-                        label = { Text("Dictionary Lookup") },
-                        singleLine = true,
-                        modifier = Modifier.weight(1f)
-                    )
-                    OutlinedButton(onClick = { onLookupWord(lookupWordInput) }) {
-                        Text("Define")
-                    }
-                }
-
-                pending.dictionaryResult?.let { dict ->
-                    Surface(
-                        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
-                        shape = RoundedCornerShape(10.dp),
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
-                        Column(modifier = Modifier.padding(10.dp)) {
-                            Text(
-                                text = "${dict.headword} ${dict.phonetic.orEmpty()} (${dict.partOfSpeech.orEmpty()})",
-                                style = MaterialTheme.typography.labelLarge,
-                                fontWeight = FontWeight.Bold
-                            )
-                            dict.definitions.forEach { def ->
-                                Text(
-                                    text = "• $def",
-                                    style = MaterialTheme.typography.bodySmall
+                    ChromeAction(Icons.AutoMirrored.Filled.ViewList, "Contents", onContents)
+                    Box {
+                        var modeMenu by remember { mutableStateOf(false) }
+                        ChromeAction(Icons.Default.AutoStories, "Mode") { modeMenu = true }
+                        DropdownMenu(expanded = modeMenu, onDismissRequest = { modeMenu = false }) {
+                            ReadingMode.entries.forEach { mode ->
+                                DropdownMenuItem(
+                                    text = { Text(mode.label) },
+                                    leadingIcon = { RadioButton(selected = prefs.readingMode == mode, onClick = null) },
+                                    onClick = { modeMenu = false; onReadingMode(mode) }
                                 )
                             }
                         }
                     }
+                    ChromeAction(
+                        if (readAloudPlaying) Icons.Default.Pause else Icons.Default.Headphones,
+                        if (readAloudPlaying) "Pause" else "Listen",
+                        onReadAloud
+                    )
+                    ChromeAction(Icons.Default.Settings, "Settings", onSettings)
                 }
-
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween
-                ) {
-                    OutlinedButton(
-                        onClick = onStartReadAloudFromHere,
-                        modifier = Modifier.testTag("speak_from_sentence_button")
-                    ) {
-                        Icon(Icons.Default.RecordVoiceOver, contentDescription = null, modifier = Modifier.size(16.dp))
-                        Spacer(modifier = Modifier.width(6.dp))
-                        Text("Read From Here")
-                    }
-
-                    Button(
-                        onClick = onSaveAnnotation,
-                        modifier = Modifier.testTag("save_annotation_button")
-                    ) {
-                        Text("Save Annotation")
-                    }
                 }
+            }
+        }
+
+        // Floating page bubble that follows the thumb while scrubbing
+        val bounds = sliderBounds
+        AnimatedVisibility(
+            visible = dragValue != null && bounds != null,
+            enter = fadeIn(tween(120)) + scaleIn(tween(120), initialScale = 0.8f),
+            exit = fadeOut(tween(120)) + scaleOut(tween(120), targetScale = 0.8f),
+            modifier = Modifier.layout { measurable, constraints ->
+                val placeable = measurable.measure(constraints.copy(minWidth = 0, minHeight = 0))
+                val b = bounds ?: androidx.compose.ui.geometry.Rect.Zero
+                val inset = with(density) { 2.dp.toPx() }
+                val fraction = if (count > 1) {
+                    val v = if (rtl) (count - 1 - shown) else shown
+                    (v / (count - 1)).coerceIn(0f, 1f)
+                } else 0f
+                val centerX = b.left + inset + fraction * (b.width - inset * 2)
+                val x = (centerX - placeable.width / 2f).roundToInt().coerceIn(0, (constraints.maxWidth - placeable.width).coerceAtLeast(0))
+                val y = (b.top - placeable.height - with(density) { 14.dp.toPx() }).roundToInt()
+                layout(constraints.maxWidth, 0) { placeable.place(x, y) }
+            }
+        ) {
+            Surface(
+                color = MaterialTheme.colorScheme.inverseSurface,
+                contentColor = MaterialTheme.colorScheme.inverseOnSurface,
+                shape = RoundedCornerShape(12.dp)
+            ) {
+                Text(
+                    "Page ${shown.roundToInt() + 1}",
+                    style = MaterialTheme.typography.labelLarge,
+                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp)
+                )
             }
         }
     }
 }
 
-@OptIn(ExperimentalLayoutApi::class)
+/** Icon with a small label underneath, for the bottom action row. */
 @Composable
-private fun ThemesAndTypographySheet(
-    prefs: ReaderPreferences,
-    onSelectTheme: (ReaderThemePreset) -> Unit,
-    onBlueLightFilterChange: (Boolean, Float) -> Unit,
-    onUpdateTypography: (String?, Float?, Int?, Float?, Float?, Float?, Boolean?, Boolean?) -> Unit,
-    onUpdateMargins: (Float, Float) -> Unit,
-    onImportCustomFont: () -> Unit
-) {
-    LazyColumn(
-        contentPadding = PaddingValues(horizontal = 20.dp, vertical = 12.dp),
-        verticalArrangement = Arrangement.spacedBy(14.dp),
+private fun ChromeAction(icon: ImageVector, label: String, onClick: () -> Unit) {
+    Column(
+        horizontalAlignment = Alignment.CenterHorizontally,
         modifier = Modifier
-            .fillMaxWidth()
-            .heightIn(max = 520.dp)
+            .clip(RoundedCornerShape(16.dp))
+            .clickable(onClick = onClick)
+            .padding(horizontal = 14.dp, vertical = 6.dp)
     ) {
-        item {
-            Text(
-                text = "Visual Themes & Eye Protection",
-                style = MaterialTheme.typography.titleMedium,
-                fontWeight = FontWeight.Bold
-            )
-        }
+        Icon(icon, contentDescription = label, modifier = Modifier.size(22.dp))
+        Text(
+            label,
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.padding(top = 2.dp)
+        )
+    }
+}
 
-        item {
-            LazyRow(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                items(ReaderThemePreset.entries) { preset ->
-                    val isSelected = prefs.themePreset == preset
-                    Surface(
-                        onClick = { onSelectTheme(preset) },
-                        color = Color(preset.backgroundArgb),
-                        shape = RoundedCornerShape(12.dp),
-                        border = BorderStroke(
-                            width = if (isSelected) 2.5.dp else 1.dp,
-                            color = if (isSelected) MaterialTheme.colorScheme.primary else Color.Gray
-                        ),
-                        modifier = Modifier.testTag("theme_preset_${preset.name}")
-                    ) {
-                        Text(
-                            text = preset.displayName,
-                            color = Color(preset.textArgb),
-                            fontWeight = FontWeight.SemiBold,
-                            modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp)
-                        )
-                    }
-                }
-            }
-        }
+@Composable
+private fun EmptyReaderState(textColor: Color, onBackToLibrary: () -> Unit) {
+    Column(
+        Modifier
+            .fillMaxSize()
+            .padding(32.dp),
+        verticalArrangement = Arrangement.Center,
+        horizontalAlignment = Alignment.CenterHorizontally
+    ) {
+        Icon(Icons.AutoMirrored.Filled.MenuBook, null, tint = textColor.copy(alpha = 0.6f), modifier = Modifier.size(56.dp))
+        Spacer(Modifier.height(16.dp))
+        Text("No book open", color = textColor, style = MaterialTheme.typography.titleLarge)
+        Spacer(Modifier.height(20.dp))
+        Button(onClick = onBackToLibrary) { Text("Open Library") }
+    }
+}
 
-        item {
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(12.dp)
-            ) {
-                Text("Blue-Light Warmth", modifier = Modifier.width(135.dp))
-                Switch(
-                    checked = prefs.blueLightFilterEnabled,
-                    onCheckedChange = { onBlueLightFilterChange(it, prefs.blueLightFilterIntensity) }
-                )
-                Slider(
-                    value = prefs.blueLightFilterIntensity,
-                    onValueChange = { onBlueLightFilterChange(true, it) },
-                    valueRange = 0.05f..0.70f,
-                    modifier = Modifier.weight(1f)
-                )
-            }
-        }
-
-        item { HorizontalDivider() }
-
-        item {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
+@Composable
+private fun ReadAloudBar(
+    tts: LiveTtsSessionState,
+    onPlayPause: () -> Unit,
+    onPrevious: () -> Unit,
+    onNext: () -> Unit,
+    onStop: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    Surface(
+        color = MaterialTheme.colorScheme.primaryContainer,
+        shape = CircleShape,
+        shadowElevation = 6.dp,
+        modifier = modifier.fillMaxWidth()
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(start = 18.dp, end = 4.dp)) {
+            if (tts.status == LiveTtsReadAloudStatus.ERROR) {
                 Text(
-                    text = "Typography & Spacing",
-                    style = MaterialTheme.typography.titleMedium,
-                    fontWeight = FontWeight.Bold
+                    tts.errorMessage ?: "Read-aloud failed",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.error,
+                    modifier = Modifier.weight(1f).padding(vertical = 10.dp)
                 )
-                OutlinedButton(
-                    onClick = onImportCustomFont,
-                    modifier = Modifier.testTag("import_ttf_font_button")
-                ) {
-                    Icon(Icons.Default.FontDownload, contentDescription = null, modifier = Modifier.size(16.dp))
-                    Spacer(modifier = Modifier.width(6.dp))
-                    Text("Load TTF/OTF")
+                IconButton(onClick = onStop) { Icon(Icons.Default.Close, "Dismiss") }
+                return@Row
+            }
+            Text(
+                when (tts.status) {
+                    LiveTtsReadAloudStatus.INITIALIZING_MODEL -> "Loading voice…"
+                    LiveTtsReadAloudStatus.PRE_BUFFERING -> "Preparing…"
+                    LiveTtsReadAloudStatus.PAUSED -> "Paused"
+                    else -> "Reading aloud"
+                },
+                style = MaterialTheme.typography.labelLarge,
+                color = MaterialTheme.colorScheme.onPrimaryContainer,
+                modifier = Modifier.weight(1f)
+            )
+            IconButton(onClick = onPrevious) { Icon(Icons.Default.SkipPrevious, "Previous sentence") }
+            IconButton(onClick = onPlayPause) {
+                when (tts.status) {
+                    LiveTtsReadAloudStatus.INITIALIZING_MODEL, LiveTtsReadAloudStatus.PRE_BUFFERING ->
+                        CircularProgressIndicator(strokeWidth = 2.dp, modifier = Modifier.size(20.dp))
+                    LiveTtsReadAloudStatus.PAUSED -> Icon(Icons.Default.PlayArrow, "Resume")
+                    else -> Icon(Icons.Default.Pause, "Pause")
                 }
             }
+            IconButton(onClick = onNext) { Icon(Icons.Default.SkipNext, "Next sentence") }
+            IconButton(onClick = onStop) { Icon(Icons.Default.Close, "Stop") }
         }
+    }
+}
 
-        item {
-            FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                ReaderPreferencesRepository.BUILTIN_FONT_FAMILIES.forEach { family ->
-                    FilterChip(
-                        selected = prefs.customFontFamilyName.equals(family, ignoreCase = true),
-                        onClick = { onUpdateTypography(family, null, null, null, null, null, null, null) },
-                        label = { Text(family) }
+@Composable
+private fun ContentsSheet(chapterTitles: List<String>, currentIndex: Int, onSelect: (Int) -> Unit) {
+    val listState = rememberLazyListState(initialFirstVisibleItemIndex = (currentIndex - 3).coerceAtLeast(0))
+    Column(Modifier.fillMaxWidth()) {
+        Text("Contents", style = MaterialTheme.typography.titleLarge, modifier = Modifier.padding(horizontal = 24.dp, vertical = 8.dp))
+        LazyColumn(state = listState, contentPadding = PaddingValues(bottom = 32.dp)) {
+            itemsIndexed(chapterTitles) { idx, title ->
+                val selected = idx == currentIndex
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable { onSelect(idx) }
+                        .background(if (selected) MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.5f) else Color.Transparent)
+                        .padding(horizontal = 24.dp, vertical = 14.dp)
+                ) {
+                    Text(
+                        "${idx + 1}",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.width(36.dp)
+                    )
+                    Text(
+                        title,
+                        style = MaterialTheme.typography.bodyLarge,
+                        fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis
                     )
                 }
             }
         }
+    }
+}
 
-        item {
-            TypographySliderRow(
-                label = "Font Size: ${prefs.fontSizeSp.toInt()} sp",
-                value = prefs.fontSizeSp,
-                range = 12f..36f,
-                onValueChange = { onUpdateTypography(null, it, null, null, null, null, null, null) }
-            )
-            TypographySliderRow(
-                label = "Font Weight: ${prefs.fontWeight}",
-                value = prefs.fontWeight.toFloat(),
-                range = 300f..700f,
-                onValueChange = { onUpdateTypography(null, null, it.toInt(), null, null, null, null, null) }
-            )
-            TypographySliderRow(
-                label = "Line Spacing: ${"%.2f".format(prefs.lineSpacingMultiplier)}x",
-                value = prefs.lineSpacingMultiplier,
-                range = 1.1f..2.2f,
-                onValueChange = { onUpdateTypography(null, null, null, it, null, null, null, null) }
-            )
-            TypographySliderRow(
-                label = "Paragraph Spacing: ${prefs.paragraphSpacingDp.toInt()} dp",
-                value = prefs.paragraphSpacingDp,
-                range = 2f..32f,
-                onValueChange = { onUpdateTypography(null, null, null, null, it, null, null, null) }
-            )
-            TypographySliderRow(
-                label = "Horizontal Margins: ${prefs.marginLeftDp.toInt()} dp",
-                value = prefs.marginLeftDp,
-                range = 8f..56f,
-                onValueChange = { onUpdateMargins(it, prefs.marginTopDp) }
+// ---------------------------------------------------------------------------------------------
+// Settings sheet: three compact tabs (Text · Page · Colour) made of grouped one-line rows.
+// The sheet stays short and the scrim light, so the page above shows every change live.
+// ---------------------------------------------------------------------------------------------
+
+private data class ColorPair(val background: Long, val text: Long)
+
+private val CUSTOM_COLOR_PAIRS = listOf(
+    ColorPair(0xFFFFFFFF, 0xFF000000),
+    ColorPair(0xFFEDE6D6, 0xFF3B3024),
+    ColorPair(0xFFDCE8D5, 0xFF223322),
+    ColorPair(0xFFDDE6F0, 0xFF1F2A36),
+    ColorPair(0xFF2B2B2B, 0xFFE0E0E0),
+    ColorPair(0xFF0E1A12, 0xFF9CCC9C),
+    ColorPair(0xFF000000, 0xFFFFB74D)
+)
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun ReaderSettingsSheet(
+    prefs: ReaderPreferences,
+    viewModel: EbookReaderViewModel,
+    onImportFont: () -> Unit
+) {
+    var tab by rememberSaveable { mutableIntStateOf(0) }
+    val maxBodyHeight = (androidx.compose.ui.platform.LocalConfiguration.current.screenHeightDp * 0.46f).dp
+    Column(Modifier.fillMaxWidth()) {
+        SingleChoiceSegmentedButtonRow(
+            Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp)
+                .padding(bottom = 8.dp)
+        ) {
+            val labels = listOf("Text", "Page", "Colour")
+            labels.forEachIndexed { i, label ->
+                SegmentedButton(
+                    selected = tab == i,
+                    onClick = { tab = i },
+                    shape = SegmentedButtonDefaults.itemShape(i, labels.size),
+                    icon = {}
+                ) { Text(label) }
+            }
+        }
+        Column(
+            Modifier
+                .fillMaxWidth()
+                .heightIn(max = maxBodyHeight)
+                .verticalScroll(rememberScrollState())
+                .padding(horizontal = 16.dp)
+                .padding(top = 4.dp, bottom = 24.dp),
+            verticalArrangement = Arrangement.spacedBy(14.dp)
+        ) {
+            when (tab) {
+                0 -> TextTab(prefs, viewModel, onImportFont)
+                1 -> PageTab(prefs, viewModel)
+                else -> ColourTab(prefs, viewModel)
+            }
+        }
+    }
+}
+
+// ---- Text ----------------------------------------------------------------------------------
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun TextTab(prefs: ReaderPreferences, viewModel: EbookReaderViewModel, onImportFont: () -> Unit) {
+    val customName = prefs.customFontFileUri?.let { File(it).nameWithoutExtension }
+    val current = prefs.customFontFamilyName
+    val builtIns = listOf("Serif", "Sans", "Mono")
+
+    SettingsGroup("Font") {
+        Row(
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            modifier = Modifier
+                .fillMaxWidth()
+                .horizontalScroll(rememberScrollState())
+                .padding(vertical = 6.dp)
+        ) {
+            FontChip("Literata", Literata, current != customName && builtIns.none { it.equals(current, true) }) {
+                viewModel.setFontFamily("Literata")
+            }
+            FontChip("Serif", FontFamily.Serif, current.equals("Serif", true)) { viewModel.setFontFamily("Serif") }
+            FontChip("Sans", FontFamily.SansSerif, current.equals("Sans", true)) { viewModel.setFontFamily("Sans") }
+            FontChip("Mono", FontFamily.Monospace, current.equals("Mono", true)) { viewModel.setFontFamily("Mono") }
+            if (customName != null) {
+                FontChip(customName, FontFamily.Default, current == customName) { viewModel.setFontFamily(customName) }
+            }
+            FilterChip(
+                selected = false,
+                onClick = onImportFont,
+                label = { Text("Import…") },
+                leadingIcon = { Icon(Icons.Filled.Add, null, Modifier.size(18.dp)) }
             )
         }
+        StepperRow(
+            label = "Size",
+            valueText = "${prefs.fontSizeSp.roundToInt()}",
+            onMinus = { viewModel.setFontSize(prefs.fontSizeSp.roundToInt() - 1f) },
+            onPlus = { viewModel.setFontSize(prefs.fontSizeSp.roundToInt() + 1f) }
+        )
+        val weights = listOf(300 to "Light", 400 to "Regular", 500 to "Medium", 700 to "Bold")
+        SingleChoiceSegmentedButtonRow(
+            Modifier
+                .fillMaxWidth()
+                .padding(top = 2.dp, bottom = 8.dp)
+        ) {
+            weights.forEachIndexed { i, (w, label) ->
+                SegmentedButton(
+                    selected = prefs.fontWeight == w,
+                    onClick = { viewModel.setFontWeight(w) },
+                    shape = SegmentedButtonDefaults.itemShape(i, weights.size),
+                    icon = {}
+                ) { Text(label, fontWeight = FontWeight(w), maxLines = 1, style = MaterialTheme.typography.labelMedium) }
+            }
+        }
+    }
 
-        item {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
+    SettingsGroup("Spacing") {
+        SliderRow("Line", "%.1f".format(prefs.lineSpacingMultiplier), prefs.lineSpacingMultiplier, 1.0f..2.4f, viewModel::setLineSpacing)
+        SliderRow("Paragraph", "${prefs.paragraphSpacingDp.roundToInt()}", prefs.paragraphSpacingDp, 0f..32f, viewModel::setParagraphSpacing)
+    }
+
+    SettingsGroup("Layout") {
+        ToggleRow("Justify", prefs.fullJustification, viewModel::setJustified)
+        ToggleRow("Indent first lines", prefs.firstLineIndent, viewModel::setFirstLineIndent)
+        ToggleRow(
+            "Book's own styles",
+            prefs.publisherStyles,
+            viewModel::setPublisherStyles,
+            supporting = "Fonts, centred titles and indents from the book"
+        )
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun FontChip(name: String, family: FontFamily, selected: Boolean, onClick: () -> Unit) {
+    FilterChip(
+        selected = selected,
+        onClick = onClick,
+        label = { Text(name, fontFamily = family, maxLines = 1) }
+    )
+}
+
+// ---- Page ----------------------------------------------------------------------------------
+
+@OptIn(ExperimentalLayoutApi::class, ExperimentalMaterial3Api::class)
+@Composable
+private fun PageTab(prefs: ReaderPreferences, viewModel: EbookReaderViewModel) {
+    SettingsGroup("Margins") {
+        SliderRow("Left", "${prefs.marginLeftDp.roundToInt()}", prefs.marginLeftDp, 0f..80f, viewModel::setMarginLeft)
+        SliderRow("Right", "${prefs.marginRightDp.roundToInt()}", prefs.marginRightDp, 0f..80f, viewModel::setMarginRight)
+        SliderRow("Top", "${prefs.marginTopDp.roundToInt()}", prefs.marginTopDp, 0f..120f, viewModel::setMarginTop)
+        SliderRow("Bottom", "${prefs.marginBottomDp.roundToInt()}", prefs.marginBottomDp, 0f..120f, viewModel::setMarginBottom)
+    }
+
+    SettingsGroup("Turning pages") {
+        val modes = listOf(
+            ReadingMode.PAGED_LTR to "Left → right",
+            ReadingMode.PAGED_RTL to "Right → left",
+            ReadingMode.PAGED_VERTICAL to "Vertical",
+            ReadingMode.CONTINUOUS to "Scroll"
+        )
+        FlowRow(
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            modifier = Modifier.padding(vertical = 6.dp)
+        ) {
+            modes.forEach { (mode, label) ->
                 FilterChip(
-                    selected = prefs.fullJustification,
-                    onClick = { onUpdateTypography(null, null, null, null, null, null, !prefs.fullJustification, null) },
-                    label = { Text(if (prefs.fullJustification) "Full Justify" else "Left Align") },
-                    leadingIcon = {
-                        Icon(
-                            imageVector = if (prefs.fullJustification) {
-                                Icons.Default.FormatAlignJustify
-                            } else {
-                                Icons.AutoMirrored.Filled.FormatAlignLeft
-                            },
-                            contentDescription = null
+                    selected = prefs.readingMode == mode,
+                    onClick = { viewModel.setReadingMode(mode) },
+                    label = { Text(label) }
+                )
+            }
+        }
+        Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(bottom = 6.dp)) {
+            Column(Modifier.weight(1f)) {
+                Text(
+                    "Tap zones",
+                    style = MaterialTheme.typography.bodyMedium,
+                    modifier = Modifier.padding(top = 4.dp, bottom = 2.dp)
+                )
+                FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    listOf(
+                        TapLayout.L_SHAPED to "L-shape",
+                        TapLayout.EDGES to "Edges",
+                        TapLayout.DISABLED to "Off"
+                    ).forEach { (layout, label) ->
+                        FilterChip(
+                            selected = prefs.tapLayout == layout,
+                            onClick = { viewModel.setTapLayout(layout) },
+                            label = { Text(label) }
                         )
                     }
-                )
-                FilterChip(
-                    selected = prefs.hyphenationEnabled,
-                    onClick = { onUpdateTypography(null, null, null, null, null, null, null, !prefs.hyphenationEnabled) },
-                    label = { Text("Auto-Hyphenation") }
-                )
+                }
+                ToggleRow("Invert", prefs.invertTapZones, viewModel::setInvertTapZones)
+            }
+            Spacer(Modifier.width(12.dp))
+            TapZonePreview(prefs)
+        }
+    }
+
+    SettingsGroup("Display") {
+        ToggleRow("Status bar", prefs.showStatusBar, viewModel::setShowStatusBar, supporting = "Battery, clock and chapter")
+        ToggleRow("Page number", prefs.showPageNumber, viewModel::setShowPageNumber)
+        ToggleRow("Keep screen on", prefs.keepScreenOn, viewModel::setKeepScreenOn)
+        ToggleRow("Hyphenation", prefs.hyphenationEnabled, viewModel::setHyphenation, supporting = "Scroll mode only")
+    }
+}
+
+/** Small diagram of the current tap layout (green = next, red = previous, centre = menu). */
+@Composable
+private fun TapZonePreview(prefs: ReaderPreferences) {
+    val next = Color(0x6643A047)
+    val prev = Color(0x66E53935)
+    Column(
+        Modifier
+            .width(64.dp)
+            .height(96.dp)
+            .clip(RoundedCornerShape(8.dp))
+            .border(1.dp, MaterialTheme.colorScheme.outlineVariant, RoundedCornerShape(8.dp))
+    ) {
+        for (row in 0..2) {
+            Row(Modifier.weight(1f)) {
+                for (col in 0..2) {
+                    val action = resolveTap(
+                        androidx.compose.ui.geometry.Offset((col + 0.5f) / 3f, (row + 0.5f) / 3f), 1f, 1f, prefs
+                    )
+                    Box(
+                        Modifier
+                            .weight(1f)
+                            .fillMaxSize()
+                            .background(
+                                when (action) {
+                                    TapAction.NEXT -> next
+                                    TapAction.PREV -> prev
+                                    TapAction.MENU -> Color.Transparent
+                                }
+                            )
+                    )
+                }
+            }
+        }
+    }
+}
+
+// ---- Colour --------------------------------------------------------------------------------
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun ColourTab(prefs: ReaderPreferences, viewModel: EbookReaderViewModel) {
+    SettingsGroup("Light") {
+        val auto = prefs.screenBrightness < 0f
+        Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.height(52.dp)) {
+            Icon(
+                Icons.Filled.BrightnessLow, null,
+                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.size(20.dp)
+            )
+            CompactSlider(
+                value = if (auto) 0.5f else prefs.screenBrightness,
+                range = 0.05f..1f,
+                onChange = viewModel::setBrightness,
+                dimmed = auto,
+                modifier = Modifier
+                    .weight(1f)
+                    .padding(horizontal = 8.dp)
+            )
+            FilterChip(selected = auto, onClick = { viewModel.setBrightness(if (auto) 0.5f else -1f) }, label = { Text("Auto") })
+        }
+        ToggleRow("Warm light", prefs.blueLightFilterEnabled, { viewModel.setWarmthFilter(it, prefs.blueLightFilterIntensity) })
+        if (prefs.blueLightFilterEnabled) {
+            SliderRow(
+                "Warmth",
+                "${(prefs.blueLightFilterIntensity * 100).roundToInt()}%",
+                prefs.blueLightFilterIntensity,
+                0.05f..0.75f,
+                { viewModel.setWarmthFilter(true, it) }
+            )
+        }
+    }
+
+    SettingsGroup("Theme") {
+        Row(
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
+            verticalAlignment = Alignment.Top,
+            modifier = Modifier
+                .fillMaxWidth()
+                .horizontalScroll(rememberScrollState())
+                .padding(vertical = 10.dp)
+        ) {
+            listOf(
+                ReaderThemePreset.DAY to "Day",
+                ReaderThemePreset.SEPIA to "Sepia",
+                ReaderThemePreset.LINEN_NIGHT to "Linen",
+                ReaderThemePreset.NIGHT to "Night",
+                ReaderThemePreset.AMOLED_BLACK to "Black"
+            ).forEach { (preset, label) ->
+                ColorSwatch(Color(preset.backgroundArgb), Color(preset.textArgb), label, prefs.themePreset == preset) {
+                    viewModel.selectTheme(preset)
+                }
+            }
+            Box(
+                Modifier
+                    .padding(top = 8.dp)
+                    .width(1.dp)
+                    .height(28.dp)
+                    .background(MaterialTheme.colorScheme.outlineVariant)
+            )
+            CUSTOM_COLOR_PAIRS.forEach { pair ->
+                ColorSwatch(
+                    Color(pair.background), Color(pair.text), null,
+                    prefs.themePreset == ReaderThemePreset.CUSTOM &&
+                        prefs.customBackgroundArgb == pair.background && prefs.customTextArgb == pair.text
+                ) { viewModel.setCustomColors(pair.background, pair.text) }
+            }
+        }
+    }
+
+    SettingsGroup("Texture") {
+        Row(
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(vertical = 10.dp)
+        ) {
+            ReaderTexture.entries.forEach { texture ->
+                TextureTile(
+                    texture = texture,
+                    background = Color(prefs.customBackgroundArgb),
+                    selected = prefs.backgroundTexture == texture,
+                    modifier = Modifier.weight(1f)
+                ) { viewModel.setBackgroundTexture(texture) }
             }
         }
     }
 }
 
 @Composable
-private fun TypographySliderRow(
+private fun TextureTile(
+    texture: ReaderTexture,
+    background: Color,
+    selected: Boolean,
+    modifier: Modifier = Modifier,
+    onClick: () -> Unit
+) {
+    Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = modifier) {
+        Box(
+            Modifier
+                .fillMaxWidth()
+                .height(44.dp)
+                .clip(RoundedCornerShape(12.dp))
+                .background(background)
+                .readerTexture(texture)
+                .border(
+                    if (selected) 2.dp else 1.dp,
+                    if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outlineVariant,
+                    RoundedCornerShape(12.dp)
+                )
+                .clickable(onClick = onClick)
+        )
+        Text(
+            texture.label,
+            style = MaterialTheme.typography.labelSmall,
+            color = if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.padding(top = 4.dp)
+        )
+    }
+}
+
+// ---- Building blocks -----------------------------------------------------------------------
+
+/** A titled card that groups related rows. */
+@Composable
+private fun SettingsGroup(title: String, content: @Composable ColumnScope.() -> Unit) {
+    Column {
+        Text(
+            title,
+            style = MaterialTheme.typography.labelMedium,
+            color = MaterialTheme.colorScheme.primary,
+            modifier = Modifier.padding(start = 6.dp, bottom = 6.dp)
+        )
+        Surface(
+            color = MaterialTheme.colorScheme.surfaceContainerHigh,
+            shape = RoundedCornerShape(20.dp)
+        ) {
+            Column(
+                Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 14.dp, vertical = 4.dp),
+                content = content
+            )
+        }
+    }
+}
+
+/** One-line switch row (the whole row is tappable). */
+@Composable
+private fun ToggleRow(label: String, checked: Boolean, onChange: (Boolean) -> Unit, supporting: String? = null) {
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        modifier = Modifier
+            .fillMaxWidth()
+            .heightIn(min = 48.dp)
+            .clickable(
+                interactionSource = remember { MutableInteractionSource() },
+                indication = null
+            ) { onChange(!checked) }
+    ) {
+        Column(Modifier.weight(1f)) {
+            Text(label, style = MaterialTheme.typography.bodyMedium)
+            if (supporting != null) {
+                Text(supporting, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+        }
+        Switch(checked = checked, onCheckedChange = onChange, modifier = Modifier.scale(0.8f))
+    }
+}
+
+/** Label · slim slider · value, all on one line. */
+@Composable
+private fun SliderRow(
     label: String,
+    valueText: String,
     value: Float,
     range: ClosedFloatingPointRange<Float>,
-    onValueChange: (Float) -> Unit
+    onChange: (Float) -> Unit
 ) {
     Row(
         verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(12.dp),
-        modifier = Modifier.fillMaxWidth()
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(44.dp)
     ) {
+        Text(label, style = MaterialTheme.typography.bodyMedium, maxLines = 1, modifier = Modifier.width(80.dp))
+        CompactSlider(value, range, onChange, modifier = Modifier.weight(1f))
         Text(
-            text = label,
-            style = MaterialTheme.typography.bodySmall,
-            modifier = Modifier.width(155.dp)
-        )
-        Slider(
-            value = value,
-            onValueChange = onValueChange,
-            valueRange = range,
-            modifier = Modifier.weight(1f)
+            valueText,
+            style = MaterialTheme.typography.labelLarge,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            textAlign = TextAlign.End,
+            maxLines = 1,
+            modifier = Modifier.width(44.dp)
         )
     }
 }
 
+/** A slider with a thin track and a slim handle, instead of the chunky default. */
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun TapGridAndPageTurnSheet(
-    prefs: ReaderPreferences,
-    onSelectPageTurnMode: (PageTurnMode) -> Unit,
-    onSetAutoScroll: (Boolean, Float) -> Unit,
-    onUpdateTapZone: (Int, Int, TapZoneAction) -> Unit
+private fun CompactSlider(
+    value: Float,
+    range: ClosedFloatingPointRange<Float>,
+    onChange: (Float) -> Unit,
+    modifier: Modifier = Modifier,
+    dimmed: Boolean = false,
+    onChangeFinished: (() -> Unit)? = null,
+    enabled: Boolean = true
 ) {
-    var selectedCell by remember { mutableStateOf(0 to 0) }
-
-    LazyColumn(
-        contentPadding = PaddingValues(horizontal = 20.dp, vertical = 12.dp),
-        verticalArrangement = Arrangement.spacedBy(12.dp),
-        modifier = Modifier
-            .fillMaxWidth()
-            .heightIn(max = 520.dp)
-    ) {
-        item {
-            Text(
-                text = "Page-Turn Mode & Auto-Scroll",
-                style = MaterialTheme.typography.titleMedium,
-                fontWeight = FontWeight.Bold
-            )
-        }
-
-        item {
-            LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                items(PageTurnMode.entries) { mode ->
-                    FilterChip(
-                        selected = prefs.pageTurnMode == mode,
-                        onClick = { onSelectPageTurnMode(mode) },
-                        label = { Text(mode.name.replace('_', ' ')) },
-                        modifier = Modifier.testTag("page_turn_mode_${mode.name}")
-                    )
-                }
-            }
-        }
-
-        item {
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(12.dp)
-            ) {
-                Text("Auto-Scroll", modifier = Modifier.width(100.dp))
-                Switch(
-                    checked = prefs.autoScrollEnabled,
-                    onCheckedChange = { onSetAutoScroll(it, prefs.autoScrollSpeedPixelsPerSec) }
-                )
-                Slider(
-                    value = prefs.autoScrollSpeedPixelsPerSec,
-                    onValueChange = { onSetAutoScroll(prefs.autoScrollEnabled, it) },
-                    valueRange = 15f..180f,
-                    modifier = Modifier.weight(1f)
-                )
-            }
-        }
-
-        item { HorizontalDivider() }
-
-        item {
-            Text(
-                text = "Customizable 9-Zone Screen Tap Grid",
-                style = MaterialTheme.typography.titleMedium,
-                fontWeight = FontWeight.Bold
-            )
-            Text(
-                text = "Tap a cell below to customize its assigned reader action:",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-        }
-
-        item {
-            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                for (r in 0..2) {
-                    Row(
-                        horizontalArrangement = Arrangement.spacedBy(6.dp),
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
-                        for (c in 0..2) {
-                            val isCellSelected = selectedCell == (r to c)
-                            val action = prefs.tapZoneGrid.actionForZone(r, c)
-                            OutlinedCard(
-                                onClick = { selectedCell = r to c },
-                                border = BorderStroke(
-                                    width = if (isCellSelected) 2.dp else 1.dp,
-                                    color = if (isCellSelected) {
-                                        MaterialTheme.colorScheme.primary
-                                    } else {
-                                        MaterialTheme.colorScheme.outlineVariant
-                                    }
-                                ),
-                                modifier = Modifier.weight(1f)
-                            ) {
-                                Column(
-                                    horizontalAlignment = Alignment.CenterHorizontally,
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .padding(vertical = 10.dp, horizontal = 4.dp)
-                                ) {
-                                    Text(
-                                        text = "Zone (${r + 1},${c + 1})",
-                                        style = MaterialTheme.typography.labelSmall,
-                                        color = MaterialTheme.colorScheme.primary
-                                    )
-                                    Text(
-                                        text = action.name.replace('_', ' '),
-                                        style = MaterialTheme.typography.labelSmall,
-                                        fontWeight = FontWeight.Bold,
-                                        maxLines = 1,
-                                        overflow = TextOverflow.Ellipsis
-                                    )
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        item {
-            LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                items(TapZoneAction.entries) { action ->
-                    val currentAction = prefs.tapZoneGrid.actionForZone(selectedCell.first, selectedCell.second)
-                    FilterChip(
-                        selected = currentAction == action,
-                        onClick = {
-                            onUpdateTapZone(selectedCell.first, selectedCell.second, action)
-                        },
-                        label = { Text(action.name.replace('_', ' ')) }
-                    )
-                }
-            }
-        }
+    val interaction = remember { MutableInteractionSource() }
+    val colors = if (dimmed) {
+        SliderDefaults.colors(
+            thumbColor = MaterialTheme.colorScheme.outline,
+            activeTrackColor = MaterialTheme.colorScheme.outline,
+            inactiveTrackColor = MaterialTheme.colorScheme.surfaceVariant
+        )
+    } else {
+        SliderDefaults.colors()
     }
+    Slider(
+        value = value.coerceIn(range.start, range.endInclusive),
+        onValueChange = onChange,
+        onValueChangeFinished = onChangeFinished,
+        enabled = enabled,
+        valueRange = range,
+        colors = colors,
+        interactionSource = interaction,
+        thumb = {
+            SliderDefaults.Thumb(
+                interactionSource = interaction,
+                colors = colors,
+                thumbSize = DpSize(4.dp, 22.dp)
+            )
+        },
+        track = { state ->
+            SliderDefaults.Track(
+                sliderState = state,
+                colors = colors,
+                modifier = Modifier.height(6.dp),
+                drawStopIndicator = null,
+                thumbTrackGapSize = 3.dp
+            )
+        },
+        modifier = modifier.height(36.dp)
+    )
 }
 
+/** Label · [−] value [+]. */
 @Composable
-private fun TocAndAnnotationsSheet(
-    viewportState: ReaderViewportState,
-    exportedJsonPreview: String?,
-    onSelectChapter: (Int) -> Unit,
-    onDeleteHighlight: (String) -> Unit,
-    onDeleteBookmark: (String) -> Unit,
-    onExportAnnotations: () -> Unit
-) {
-    var activeSubTab by remember { mutableIntStateOf(0) }
-
-    Column(
+private fun StepperRow(label: String, valueText: String, onMinus: () -> Unit, onPlus: () -> Unit) {
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
         modifier = Modifier
             .fillMaxWidth()
-            .heightIn(max = 520.dp)
-            .padding(horizontal = 20.dp, vertical = 12.dp),
-        verticalArrangement = Arrangement.spacedBy(12.dp)
+            .height(52.dp)
     ) {
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                FilterChip(
-                    selected = activeSubTab == 0,
-                    onClick = { activeSubTab = 0 },
-                    label = { Text("Chapters (${viewportState.chapters.size})") }
-                )
-                FilterChip(
-                    selected = activeSubTab == 1,
-                    onClick = { activeSubTab = 1 },
-                    label = { Text("Highlights (${viewportState.chapterHighlights.size})") }
-                )
-                FilterChip(
-                    selected = activeSubTab == 2,
-                    onClick = { activeSubTab = 2 },
-                    label = { Text("Bookmarks (${viewportState.chapterBookmarks.size})") }
-                )
-            }
-            IconButton(
-                onClick = onExportAnnotations,
-                modifier = Modifier.testTag("export_annotations_button")
-            ) {
-                Icon(Icons.Default.FileDownload, contentDescription = "Export Annotations JSON")
-            }
+        Text(label, style = MaterialTheme.typography.bodyMedium, modifier = Modifier.weight(1f))
+        FilledTonalIconButton(onClick = onMinus, modifier = Modifier.size(36.dp)) {
+            Icon(Icons.Filled.Remove, "Smaller", Modifier.size(18.dp))
         }
-
-        if (!exportedJsonPreview.isNullOrBlank()) {
-            Surface(
-                color = MaterialTheme.colorScheme.secondaryContainer,
-                shape = RoundedCornerShape(8.dp),
-                modifier = Modifier.fillMaxWidth()
-            ) {
-                Text(
-                    text = "Exported JSON Bundle: ${exportedJsonPreview.take(140)}...",
-                    style = MaterialTheme.typography.labelSmall,
-                    modifier = Modifier.padding(8.dp)
-                )
-            }
-        }
-
-        LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            when (activeSubTab) {
-                0 -> {
-                    items(viewportState.chapters, key = { it.id }) { chapter ->
-                        val isCurrent = chapter.chapterIndex == viewportState.currentChapterIndex
-                        OutlinedCard(
-                            onClick = { onSelectChapter(chapter.chapterIndex) },
-                            modifier = Modifier.fillMaxWidth()
-                        ) {
-                            Row(
-                                modifier = Modifier.padding(12.dp),
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Column(modifier = Modifier.weight(1f)) {
-                                    Text(
-                                        text = chapter.title,
-                                        fontWeight = if (isCurrent) FontWeight.Bold else FontWeight.Normal,
-                                        color = if (isCurrent) {
-                                            MaterialTheme.colorScheme.primary
-                                        } else {
-                                            MaterialTheme.colorScheme.onSurface
-                                        }
-                                    )
-                                    Text(
-                                        text = "${chapter.wordCount} words",
-                                        style = MaterialTheme.typography.labelSmall,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                                    )
-                                }
-                            }
-                        }
-                    }
-                }
-
-                1 -> {
-                    items(viewportState.chapterHighlights, key = { it.id }) { hl ->
-                        OutlinedCard(modifier = Modifier.fillMaxWidth()) {
-                            Row(
-                                modifier = Modifier.padding(12.dp),
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Column(modifier = Modifier.weight(1f)) {
-                                    Text(
-                                        text = "“${hl.selectedText}”",
-                                        style = MaterialTheme.typography.bodySmall,
-                                        fontWeight = FontWeight.Medium
-                                    )
-                                    if (!hl.noteMarkdown.isNullOrBlank()) {
-                                        Text(
-                                            text = "Note: ${hl.noteMarkdown}",
-                                            style = MaterialTheme.typography.labelSmall,
-                                            color = MaterialTheme.colorScheme.primary
-                                        )
-                                    }
-                                }
-                                IconButton(onClick = { onDeleteHighlight(hl.id) }) {
-                                    Icon(Icons.Default.Delete, contentDescription = "Delete highlight")
-                                }
-                            }
-                        }
-                    }
-                }
-
-                else -> {
-                    items(viewportState.chapterBookmarks, key = { it.id }) { bm ->
-                        OutlinedCard(modifier = Modifier.fillMaxWidth()) {
-                            Row(
-                                modifier = Modifier.padding(12.dp),
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Column(modifier = Modifier.weight(1f)) {
-                                    Text(
-                                        text = bm.label ?: bm.chapterTitle,
-                                        style = MaterialTheme.typography.bodyMedium,
-                                        fontWeight = FontWeight.Bold
-                                    )
-                                    Text(
-                                        text = bm.snippetText,
-                                        style = MaterialTheme.typography.bodySmall,
-                                        maxLines = 2
-                                    )
-                                }
-                                IconButton(onClick = { onDeleteBookmark(bm.id) }) {
-                                    Icon(Icons.Default.Delete, contentDescription = "Delete bookmark")
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun InBookRegexSearchSheet(
-    query: String,
-    useRegex: Boolean,
-    caseSensitive: Boolean,
-    results: List<com.example.domain.reader.ReaderSearchResult>,
-    onQueryChanged: (String, Boolean, Boolean) -> Unit,
-    onSelectMatch: (com.example.domain.reader.ReaderSearchResult) -> Unit
-) {
-    Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .heightIn(max = 520.dp)
-            .padding(horizontal = 20.dp, vertical = 12.dp),
-        verticalArrangement = Arrangement.spacedBy(10.dp)
-    ) {
         Text(
-            text = "Full-Text & Regular Expression Search",
-            style = MaterialTheme.typography.titleMedium,
-            fontWeight = FontWeight.Bold
+            valueText,
+            style = MaterialTheme.typography.titleMedium.copy(fontFamily = FontFamily.Default),
+            textAlign = TextAlign.Center,
+            modifier = Modifier.width(48.dp)
         )
+        FilledTonalIconButton(onClick = onPlus, modifier = Modifier.size(36.dp)) {
+            Icon(Icons.Filled.Add, "Larger", Modifier.size(18.dp))
+        }
+    }
+}
 
-        OutlinedTextField(
-            value = query,
-            onValueChange = { onQueryChanged(it, useRegex, caseSensitive) },
-            label = { Text("Search book text or regex pattern...") },
-            singleLine = true,
+@Composable
+private fun ColorSwatch(background: Color, text: Color, label: String?, selected: Boolean, onClick: () -> Unit) {
+    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+        Box(
+            contentAlignment = Alignment.Center,
             modifier = Modifier
-                .fillMaxWidth()
-                .testTag("in_book_search_input")
-        )
-
-        Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-            FilterChip(
-                selected = useRegex,
-                onClick = { onQueryChanged(query, !useRegex, caseSensitive) },
-                label = { Text("Regex (.*)") }
-            )
-            FilterChip(
-                selected = caseSensitive,
-                onClick = { onQueryChanged(query, useRegex, !caseSensitive) },
-                label = { Text("Case Sensitive") }
-            )
-            Spacer(modifier = Modifier.weight(1f))
+                .size(44.dp)
+                .clip(CircleShape)
+                .background(background)
+                .border(
+                    if (selected) 3.dp else 1.dp,
+                    if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outlineVariant,
+                    CircleShape
+                )
+                .clickable(onClick = onClick)
+        ) { Text("Aa", color = text, fontWeight = FontWeight.SemiBold) }
+        if (label != null) {
             Text(
-                text = "${results.size} matches",
-                style = MaterialTheme.typography.labelMedium,
-                modifier = Modifier.align(Alignment.CenterVertically)
+                label,
+                style = MaterialTheme.typography.labelSmall,
+                color = if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(top = 4.dp)
             )
-        }
-
-        LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            items(results) { match ->
-                OutlinedCard(
-                    onClick = { onSelectMatch(match) },
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Column(modifier = Modifier.padding(12.dp)) {
-                        Text(
-                            text = "${match.chapterTitle} • ${(match.progressionInChapter * 100).toInt()}%",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.primary,
-                            fontWeight = FontWeight.Bold
-                        )
-                        Text(
-                            text = match.surroundingSnippet,
-                            style = MaterialTheme.typography.bodySmall
-                        )
-                    }
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun LiveTtsReadAloudSheet(
-    ttsState: LiveTtsSessionState,
-    availableVoices: List<com.example.domain.tts.TtsVoiceProfile>,
-    onTogglePlayPause: () -> Unit,
-    onStop: () -> Unit,
-    onSelectVoice: (TtsEngineType, com.example.domain.tts.TtsVoiceProfile) -> Unit,
-    onSpeedChange: (Float) -> Unit
-) {
-    Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(horizontal = 20.dp, vertical = 14.dp),
-        verticalArrangement = Arrangement.spacedBy(14.dp)
-    ) {
-        Text(
-            text = "Live Read-Aloud with Real-Time Sentence Sync",
-            style = MaterialTheme.typography.titleMedium,
-            fontWeight = FontWeight.Bold
-        )
-        Text(
-            text = "Pre-buffers 3 sentences ahead via Kokoro-82M / Cloud TTS, highlights each spoken sentence, and auto-turns pages.",
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant
-        )
-
-        LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            items(availableVoices, key = { it.id }) { voice ->
-                FilterChip(
-                    selected = ttsState.activeVoiceId == voice.id,
-                    onClick = { onSelectVoice(voice.engineType, voice) },
-                    label = { Text(voice.name) }
-                )
-            }
-        }
-
-        Row(
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(10.dp)
-        ) {
-            Icon(Icons.Default.Speed, contentDescription = null)
-            Text("Speed: ${"%.2f".format(ttsState.playbackSpeed)}x", modifier = Modifier.width(110.dp))
-            Slider(
-                value = ttsState.playbackSpeed,
-                onValueChange = onSpeedChange,
-                valueRange = 0.5f..3.0f,
-                modifier = Modifier.weight(1f)
-            )
-        }
-
-        Row(
-            horizontalArrangement = Arrangement.spacedBy(12.dp),
-            modifier = Modifier.fillMaxWidth()
-        ) {
-            Button(
-                onClick = onTogglePlayPause,
-                modifier = Modifier
-                    .weight(1f)
-                    .testTag("sheet_tts_play_pause_button")
-            ) {
-                Icon(
-                    imageVector = if (ttsState.status == LiveTtsReadAloudStatus.PLAYING) {
-                        Icons.Default.Pause
-                    } else {
-                        Icons.Default.PlayArrow
-                    },
-                    contentDescription = null
-                )
-                Spacer(modifier = Modifier.width(8.dp))
-                Text(
-                    if (ttsState.status == LiveTtsReadAloudStatus.PLAYING) {
-                        "Pause Read-Aloud"
-                    } else {
-                        "Start Read-Aloud"
-                    }
-                )
-            }
-            if (ttsState.status != LiveTtsReadAloudStatus.IDLE) {
-                OutlinedButton(onClick = onStop) {
-                    Text("Stop")
-                }
-            }
         }
     }
 }

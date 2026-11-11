@@ -52,6 +52,13 @@ enum class ReaderThemePreset(
         linkArgb = 0xFF64B5F6,
         selectionArgb = 0x6637474F
     ),
+    LINEN_NIGHT(
+        displayName = "Linen Night",
+        backgroundArgb = 0xFF262624,
+        textArgb = 0xFFCFC8BA,
+        linkArgb = 0xFFB8A57A,
+        selectionArgb = 0x66806A45
+    ),
     CUSTOM(
         displayName = "Custom Theme",
         backgroundArgb = 0xFFFAF8F5,
@@ -129,8 +136,46 @@ data class ReaderPreferences(
     val leftEdgeBrightnessSwipe: Boolean = true,
     val rightEdgeVolumeSwipe: Boolean = true,
     val volumeKeyPageTurn: Boolean = true,
-    val keepScreenOn: Boolean = true
+    val keepScreenOn: Boolean = true,
+    /** Reader-only screen brightness 0.05..1, or -1 to follow the system brightness. */
+    val screenBrightness: Float = -1f,
+    val readingMode: ReadingMode = ReadingMode.PAGED_LTR,
+    val tapLayout: TapLayout = TapLayout.L_SHAPED,
+    val invertTapZones: Boolean = false,
+    val showPageNumber: Boolean = true,
+    /** Honour the book's own fonts, alignment and indents (italics/bold are always kept). */
+    val publisherStyles: Boolean = true,
+    val backgroundTexture: ReaderTexture = ReaderTexture.NONE,
+    /** Indent the first line of each body paragraph (instead of relying on the book's CSS). */
+    val firstLineIndent: Boolean = false,
+    /** Battery, clock, chapter and page along the bottom edge. */
+    val showStatusBar: Boolean = true
 )
+
+/** Subtle surface textures drawn behind the text. */
+@Serializable
+enum class ReaderTexture(val label: String) {
+    NONE("Plain"),
+    LINEN("Linen"),
+    PAPER("Paper"),
+    CANVAS("Canvas")
+}
+
+/** Tachiyomi-style reading modes, adapted for text. */
+@Serializable
+enum class ReadingMode(val label: String) {
+    PAGED_LTR("Paged (left to right)"),
+    PAGED_RTL("Paged (right to left)"),
+    PAGED_VERTICAL("Paged (vertical)"),
+    CONTINUOUS("Continuous scroll")
+}
+
+@Serializable
+enum class TapLayout(val label: String) {
+    L_SHAPED("L-shaped"),
+    EDGES("Left & right edges"),
+    DISABLED("Off (menu only)")
+}
 
 @Serializable
 data class SentenceLocator(
@@ -159,8 +204,56 @@ data class ReaderChapterDocument(
     val paragraphs: List<String>,
     val sentences: List<SentenceLocator>,
     val embeddedImageUris: List<String> = emptyList(),
-    val totalWords: Int = 0
+    val totalWords: Int = 0,
+    /** The book's own (publisher CSS) styling, one entry per paragraph index. */
+    val paragraphStyles: List<ParagraphStyleInfo> = emptyList(),
+    /** Fonts embedded in the book, extracted to local files. */
+    val embeddedFonts: List<EmbeddedFontFace> = emptyList(),
+    /** Pictures in the chapter, in reading order. */
+    val images: List<ChapterImage> = emptyList()
 )
+
+/** A picture from the book, shown after [afterParagraph] paragraphs of the chapter. */
+@Serializable
+data class ChapterImage(
+    val afterParagraph: Int,
+    val path: String,
+    val width: Int,
+    val height: Int,
+    val alt: String? = null
+)
+
+@Serializable
+enum class BlockAlign { DEFAULT, START, CENTER, END, JUSTIFY }
+
+/** Inline formatting over [start, end) of a paragraph's text. */
+@Serializable
+data class StyledRun(
+    val start: Int,
+    val end: Int,
+    val italic: Boolean = false,
+    val bold: Boolean = false,
+    val underline: Boolean = false,
+    val strike: Boolean = false,
+    val smallCaps: Boolean = false,
+    /** 1 = superscript, -1 = subscript. */
+    val script: Int = 0,
+    val fontFamily: String? = null
+)
+
+/** Block-level styling of one paragraph, as the book's stylesheet describes it. */
+@Serializable
+data class ParagraphStyleInfo(
+    val align: BlockAlign = BlockAlign.DEFAULT,
+    val indentEm: Float = 0f,
+    val fontFamily: String? = null,
+    val sizeScale: Float = 1f,
+    val headingLevel: Int = 0,
+    val runs: List<StyledRun> = emptyList()
+)
+
+@Serializable
+data class EmbeddedFontFace(val family: String, val path: String, val weight: Int = 400, val italic: Boolean = false)
 
 @Serializable
 data class ReaderSearchResult(
@@ -215,6 +308,9 @@ interface UnifiedEbookReaderEngine {
     suspend fun navigateToChapter(chapterIndex: Int, charOffset: Int = 0)
     suspend fun navigateToSentence(sentenceLocator: SentenceLocator)
     suspend fun navigateToProgression(overallProgression: Float)
+
+    /** Persists the reading position inside the current chapter (as the reader scrolls). */
+    suspend fun updateReadingCharOffset(charOffset: Int)
 
     suspend fun extractChapterSentences(bookId: String, chapterIndex: Int): Result<List<SentenceLocator>>
 

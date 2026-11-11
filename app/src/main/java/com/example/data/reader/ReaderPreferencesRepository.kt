@@ -73,7 +73,13 @@ class ReaderPreferencesRepository @Inject constructor(
             current.copy(
                 themePreset = preset,
                 customBackgroundArgb = preset.backgroundArgb,
-                customTextArgb = preset.textArgb
+                customTextArgb = preset.textArgb,
+                // The linen theme is defined by its texture
+                backgroundTexture = if (preset == ReaderThemePreset.LINEN_NIGHT) {
+                    com.example.domain.reader.ReaderTexture.LINEN
+                } else {
+                    current.backgroundTexture
+                }
             )
         }
     }

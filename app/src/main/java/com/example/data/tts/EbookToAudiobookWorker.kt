@@ -31,6 +31,7 @@ import com.example.data.local.entity.AudioTrackEntity
 import com.example.data.local.entity.BookEntity
 import com.example.data.local.entity.BookFormat
 import com.example.data.local.entity.ChapterEntity
+import com.example.data.local.entity.ReadingStatus
 import com.example.data.local.entity.MediaType
 import com.example.data.local.entity.TtsEngineType
 import com.example.data.local.entity.TtsSyncCueEntity
@@ -109,6 +110,7 @@ class EbookToAudiobookWorker @AssistedInject constructor(
     private val localKokoroProvider: LocalKokoroTtsProvider,
     private val cloudApiProvider: CloudApiTtsProvider,
     private val readAloudCoordinator: ReadAloudCoordinator,
+    private val ebookParserService: com.example.data.reader.EbookParserService,
     private val exportManager: BatchAudiobookExportManagerImpl,
     private val json: Json
 ) : CoroutineWorker(appContext, workerParams) {
@@ -128,6 +130,7 @@ class EbookToAudiobookWorker @AssistedInject constructor(
 
         ensureNotificationChannel()
         val notificationId = (spec.jobId.hashCode() and 0x7FFFFFFF).coerceAtLeast(1001)
+        var tempPcmFile: File? = null
 
         try {
             val book = bookDao.getBookById(spec.bookId)
@@ -143,53 +146,48 @@ class EbookToAudiobookWorker @AssistedInject constructor(
                 )
             )
 
-            // 1. Resolve chapters from DB or extract directly from EPUB/MOBI/TXT file
-            var allChapters = chapterDao.getChaptersForBook(book.id)
-            val extractedContents = extractChapterContentMap(book)
-            if (allChapters.isEmpty() && extractedContents.isNotEmpty()) {
-                val generatedChapters = extractedContents.entries.mapIndexed { idx, entry ->
-                    ChapterEntity(
-                        id = "${book.id}_ch_$idx",
-                        bookId = book.id,
-                        chapterIndex = idx,
-                        title = entry.value.first,
-                        href = "chapter_$idx.xhtml",
-                        wordCount = entry.value.second.split(Regex("\\s+")).count { it.isNotBlank() },
-                        charCount = entry.value.second.length
-                    )
-                }
-                chapterDao.upsertChapters(generatedChapters)
-                allChapters = generatedChapters
+            // 1. Parse the book with the same parser the Reader uses (same chapters, same text)
+            val parsed = ebookParserService.parseEbookPackage(book)
+            val allChapters = parsed.chapters
+            if (allChapters.isEmpty()) {
+                throw IllegalStateException("Couldn't read any text from \"${book.title}\"")
             }
 
+            // The picker lists stored chapters; match them to the parsed book by file, not by
+            // number, since a parser update can shift numbering (e.g. picture-only pages).
+            val storedChapters = chapterDao.getChaptersForBook(book.id)
             val selectedChapters = if (spec.chapterIndices.isEmpty()) {
                 allChapters
             } else {
-                val filterSet = spec.chapterIndices.toSet()
-                allChapters.filter { it.chapterIndex in filterSet }.ifEmpty { allChapters }
+                val wanted = spec.chapterIndices.mapNotNull { idx ->
+                    storedChapters.firstOrNull { it.chapterIndex == idx }?.let { it.href to it.title }
+                }.toSet()
+                val byFile = allChapters.filter { (it.href to it.title) in wanted }
+                    .ifEmpty { allChapters.filter { ch -> wanted.any { it.first == ch.href } } }
+                byFile.ifEmpty {
+                    val filterSet = spec.chapterIndices.toSet()
+                    allChapters.filter { it.chapterIndex in filterSet }
+                }
             }
+            ebookParserService.syncStoredChapters(book, allChapters)
 
             if (selectedChapters.isEmpty()) {
-                return@withContext Result.failure(workDataOf(KEY_ERROR_MESSAGE to "No chapters available to convert"))
+                throw IllegalStateException("None of the selected chapters exist in this book")
             }
 
-            // 2. Initialize selected TTS provider
+            // 2. Initialize the chosen TTS engine (no silent fallback to another voice/engine)
             val activeProvider: TtsProvider = when (spec.engineType) {
                 TtsEngineType.LOCAL_KOKORO -> localKokoroProvider
                 else -> cloudApiProvider
             }
-            activeProvider.initialize().onFailure {
-                // Fallback to Local Kokoro if Cloud initialization fails
-                localKokoroProvider.initialize().getOrThrow()
-            }
+            activeProvider.initialize().getOrThrow()
 
             // 3. Tokenize all selected chapters into SentenceLocators to calculate accurate progress & ETA
             val chapterSentencesMap = LinkedHashMap<ChapterEntity, List<SentenceLocator>>()
             var totalSentencesAcrossJob = 0
 
             for (chapter in selectedChapters) {
-                val rawChapterContent = extractedContents[chapter.chapterIndex]?.second
-                    ?: buildFallbackChapterText(book, chapter)
+                val rawChapterContent = parsed.chapterRawHtmlMap[chapter.chapterIndex].orEmpty()
                 val sentences = readAloudCoordinator.tokenizeChapterIntoSentences(
                     bookId = book.id,
                     chapterIndex = chapter.chapterIndex,
@@ -198,14 +196,36 @@ class EbookToAudiobookWorker @AssistedInject constructor(
                 )
                 chapterSentencesMap[chapter] = sentences
                 totalSentencesAcrossJob += sentences.size
+                Log.i(TAG, "Chapter ${chapter.chapterIndex} \"${chapter.title}\": ${rawChapterContent.length} chars → ${sentences.size} sentences")
             }
 
-            totalSentencesAcrossJob = max(1, totalSentencesAcrossJob)
+            if (totalSentencesAcrossJob == 0) {
+                throw IllegalStateException("The selected chapters have no text to narrate")
+            }
+            // Progress and time left follow the amount of text, not the sentence count: a
+            // one-word line and a long paragraph take very different times to narrate.
+            val totalCharsAcrossJob = chapterSentencesMap.values.sumOf { list -> list.sumOf { it.text.length } }.coerceAtLeast(1)
+            var completedCharsGlobal = 0
+
+            // Each chapter selection is its own audiobook: narrating chapters 11-20 must never
+            // overwrite the audiobook made from chapters 1-10. Re-running the same selection
+            // with the same voice replaces it.
+            val textChapterCount = allChapters.count { it.wordCount >= 30 }.coerceAtLeast(1)
+            val isWholeBook = selectedChapters.size >= (textChapterCount * 0.9f)
+            val chapterSetKey = if (isWholeBook) "" else
+                "_" + Integer.toHexString(selectedChapters.joinToString("|") { it.href }.hashCode())
+            fun shortTitle(ch: ChapterEntity) = ch.title.substringBefore(':').trim().take(40)
+            val partLabel = when {
+                isWholeBook -> null
+                selectedChapters.size == 1 -> shortTitle(selectedChapters[0])
+                else -> "${shortTitle(selectedChapters.first())} – ${shortTitle(selectedChapters.last())}"
+            }
 
             val outputDir = File(appContext.filesDir, "audiobooks/${book.id}").apply { mkdirs() }
-            val baseFileName = "${book.title.replace(Regex("[^a-zA-Z0-9_-]"), "_").take(40)}_${spec.voiceId}"
+            val baseFileName = "${book.title.replace(Regex("[^a-zA-Z0-9_-]"), "_").take(40)}_${spec.voiceId}$chapterSetKey"
             val rawPcmTempFile = File(outputDir, "${baseFileName}_${spec.jobId}.rawpcm")
             if (rawPcmTempFile.exists()) rawPcmTempFile.delete()
+            tempPcmFile = rawPcmTempFile
 
             val allSyncCues = ArrayList<TtsSyncCueEntity>(totalSentencesAcrossJob)
             val sidecarChapters = ArrayList<SyncedSidecarChapterEntry>(selectedChapters.size)
@@ -237,13 +257,13 @@ class EbookToAudiobookWorker @AssistedInject constructor(
                             speed = spec.speed
                         )
 
-                        val synthesizedChunk = activeProvider.synthesizeSentence(request)
-                            .recoverCatching {
-                                localKokoroProvider.synthesizeSentence(request).getOrThrow()
-                            }
-                            .getOrThrow()
+                        val synthesizedChunk = activeProvider.synthesizeSentence(request).getOrThrow()
 
-                        val floatSamples = synthesizedChunk.pcmFloatSamples
+                        val floatSamples = resampleLinear(
+                            synthesizedChunk.pcmFloatSamples,
+                            fromRateHz = synthesizedChunk.sampleRateHz,
+                            toRateHz = sampleRateHz
+                        )
                         // Add 140ms inter-sentence natural pause
                         val pauseSamples = FloatArray((sampleRateHz * 0.14f).toInt())
                         val combinedSamples = FloatArray(floatSamples.size + pauseSamples.size)
@@ -299,13 +319,14 @@ class EbookToAudiobookWorker @AssistedInject constructor(
                         allSyncCues.add(cueEntity)
 
                         completedSentencesGlobal++
-                        val fraction = (completedSentencesGlobal.toFloat() / totalSentencesAcrossJob.toFloat())
+                        completedCharsGlobal += locator.text.length
+                        val fraction = (completedCharsGlobal.toFloat() / totalCharsAcrossJob.toFloat())
                             .coerceIn(0f, 0.96f)
                         val percentInt = (fraction * 100).toInt()
                         val etaText = formatEstimatedRemainingTime(
                             startWallClockMs = startWallClockMs,
-                            completedUnits = completedSentencesGlobal,
-                            totalUnits = totalSentencesAcrossJob
+                            completedUnits = completedCharsGlobal,
+                            totalUnits = totalCharsAcrossJob
                         )
 
                         val progressSnapshot = BatchConversionProgress(
@@ -317,7 +338,9 @@ class EbookToAudiobookWorker @AssistedInject constructor(
                             totalChaptersCount = selectedChapters.size,
                             currentSentenceIndex = sentencePos + 1,
                             totalSentencesInChapter = sentences.size,
-                            overallProgressFraction = fraction
+                            overallProgressFraction = fraction,
+                            currentChapterTitle = chapter.title,
+                            etaText = etaText
                         )
                         exportManager.updateJobProgressState(progressSnapshot)
 
@@ -349,7 +372,10 @@ class EbookToAudiobookWorker @AssistedInject constructor(
             }
 
             // 5. Encode/Mux the raw 16-bit PCM file into the user's chosen AudioExportFormat (.m4b / .mp3 / .wav)
-            val finalAudioFile = File(outputDir, "$baseFileName.${spec.exportFormat.extension}")
+            if (rawPcmTempFile.length() == 0L) {
+                throw IllegalStateException("No audio was produced for the selected chapters")
+            }
+            var finalAudioFile = File(outputDir, "$baseFileName.${spec.exportFormat.extension}")
             when (spec.exportFormat) {
                 AudioExportFormat.M4B -> {
                     val encodedOk = encodePcm16FileToAacM4b(
@@ -358,10 +384,13 @@ class EbookToAudiobookWorker @AssistedInject constructor(
                         sampleRateHz = sampleRateHz
                     )
                     if (!encodedOk) {
+                        // Never throw away hours of narration over an encoder hiccup: keep it as WAV
+                        finalAudioFile.delete()
+                        finalAudioFile = File(outputDir, "$baseFileName.${AudioExportFormat.WAV.extension}")
                         writeWavFileFromRawPcm16(rawPcmTempFile, finalAudioFile, sampleRateHz)
                     }
                 }
-                AudioExportFormat.WAV, AudioExportFormat.MP3 -> {
+                AudioExportFormat.WAV -> {
                     writeWavFileFromRawPcm16(rawPcmTempFile, finalAudioFile, sampleRateHz)
                 }
             }
@@ -374,7 +403,7 @@ class EbookToAudiobookWorker @AssistedInject constructor(
                 }
             } else null
 
-            val audiobookEntityId = "${book.id}_audiobook_${spec.voiceId}"
+            val audiobookEntityId = "${book.id}_audiobook_${spec.voiceId}$chapterSetKey"
             val jsonSidecarFile = if (spec.generateJsonSyncSidecar) {
                 File(outputDir, "$baseFileName.sync.json").also { file ->
                     val doc = SyncedAudiobookSidecarDocument(
@@ -428,23 +457,38 @@ class EbookToAudiobookWorker @AssistedInject constructor(
             )
             audioTrackDao.upsertTrack(primaryTrack)
 
-            // Upgrade source ebook to HYBRID_SYNCED and also register a dedicated Audiobook library entry
+            // The narration becomes its own audiobook in Listen; the source ebook stays a book
             val finalAudioUri = Uri.fromFile(finalAudioFile).toString()
-            bookDao.attachSyncedAudiobook(
-                bookId = book.id,
-                mediaType = MediaType.HYBRID_SYNCED,
-                audiobookUri = finalAudioUri,
-                sidecarPath = jsonSidecarFile?.absolutePath ?: lrcFile?.absolutePath
-            )
 
+            // A fresh listen: none of the source ebook's reading progress carries over
+            val previousAudiobook = bookDao.getBookById(audiobookEntityId)
             val standaloneAudiobook = book.copy(
                 id = audiobookEntityId,
-                title = "${book.title} (AI Audiobook)",
-                narrator = "Kokoro / ${spec.voiceId}",
+                title = if (partLabel == null) "${book.title} (AI Audiobook)" else "${book.title} · $partLabel",
+                readingStatus = ReadingStatus.UNREAD,
+                totalChapters = sidecarChapters.size,
+                currentChapterIndex = 0,
+                currentLocatorJson = null,
+                currentCharOffset = 0,
+                currentAudioTrackIndex = 0,
+                currentAudioPositionMs = 0L,
+                progressionPercentage = 0f,
+                playbackSpeed = previousAudiobook?.playbackSpeed ?: 1.0f,
+                lastOpenedAt = null, // new, not listened yet: first on the shelf (by addedAt), not "continue listening"
+                completedAt = null,
+                tags = listOf(com.example.data.local.entity.STUDIO_TAG),
+                collections = emptyList(),
+                isFavorite = previousAudiobook?.isFavorite ?: false,
+                parentFolderUri = null,
+                narrator = when (spec.engineType) {
+                    TtsEngineType.LOCAL_KOKORO -> "Kokoro · ${spec.voiceId}"
+                    TtsEngineType.CLOUD_OPENAI -> "OpenAI · ${spec.voiceId}"
+                    TtsEngineType.CLOUD_ELEVENLABS -> "ElevenLabs"
+                    TtsEngineType.CLOUD_GEMINI -> "Gemini · ${spec.voiceId}"
+                },
                 format = when (spec.exportFormat) {
                     AudioExportFormat.M4B -> BookFormat.M4B
-                    AudioExportFormat.MP3 -> BookFormat.MP3
-                    AudioExportFormat.WAV -> BookFormat.M4B
+                    AudioExportFormat.WAV -> BookFormat.fromExtension("wav")
                 },
                 mediaType = MediaType.AUDIOBOOK,
                 fileUri = finalAudioUri,
@@ -461,13 +505,35 @@ class EbookToAudiobookWorker @AssistedInject constructor(
                     bookId = audiobookEntityId
                 )
             )
+            // Chapter markers for the generated audiobook (shown in the player's chapter list)
+            chapterDao.deleteChaptersForBook(audiobookEntityId)
+            chapterDao.upsertChapters(
+                sidecarChapters.mapIndexed { idx, ch ->
+                    ChapterEntity(
+                        id = "${audiobookEntityId}_ch_$idx",
+                        bookId = audiobookEntityId,
+                        chapterIndex = idx,
+                        title = ch.title,
+                        href = "chapter_${ch.chapterIndex}",
+                        audioTrackId = "${audiobookEntityId}_track_0",
+                        startTimeMs = ch.startTimeMs,
+                        endTimeMs = ch.endTimeMs,
+                        isTtsConverted = true
+                    )
+                }
+            )
+            // Cues re-indexed to the audiobook's own chapter positions (0..n-1)
+            val positionBySourceChapter = sidecarChapters.mapIndexed { pos, ch -> ch.chapterIndex to pos }.toMap()
             val audiobookCues = allSyncCues.map { cue ->
+                val pos = positionBySourceChapter[cue.chapterIndex] ?: 0
                 cue.copy(
-                    id = "${audiobookEntityId}_ch${cue.chapterIndex}_s${cue.sentenceIndex}",
+                    id = "${audiobookEntityId}_ch${pos}_s${cue.sentenceIndex}",
                     bookId = audiobookEntityId,
+                    chapterIndex = pos,
                     audioTrackId = "${audiobookEntityId}_track_0"
                 )
             }
+            ttsSyncCueDao.deleteCuesForBook(audiobookEntityId)
             ttsSyncCueDao.upsertCues(audiobookCues)
 
             val completedProgress = BatchConversionProgress(
@@ -480,6 +546,7 @@ class EbookToAudiobookWorker @AssistedInject constructor(
                 currentSentenceIndex = totalSentencesAcrossJob,
                 totalSentencesInChapter = totalSentencesAcrossJob,
                 overallProgressFraction = 1.0f,
+                outputAudiobookBookId = audiobookEntityId,
                 outputAudiobookFileUri = finalAudioUri,
                 outputLrcSidecarPath = lrcFile?.absolutePath,
                 outputJsonSidecarPath = jsonSidecarFile?.absolutePath
@@ -502,6 +569,7 @@ class EbookToAudiobookWorker @AssistedInject constructor(
                 )
             )
         } catch (ce: CancellationException) {
+            tempPcmFile?.delete()
             exportManager.updateJobProgressState(
                 BatchConversionProgress(
                     jobId = spec.jobId,
@@ -513,6 +581,7 @@ class EbookToAudiobookWorker @AssistedInject constructor(
             throw ce
         } catch (e: Exception) {
             Log.e(TAG, "EbookToAudiobookWorker failed", e)
+            tempPcmFile?.delete()
             val failedState = BatchConversionProgress(
                 jobId = spec.jobId,
                 bookId = spec.bookId,
@@ -524,105 +593,18 @@ class EbookToAudiobookWorker @AssistedInject constructor(
         }
     }
 
-    /**
-     * Extracts chapter titles and clean HTML/text directly from EPUB (ZIP container),
-     * MOBI/AZW3 PalmDOC records, FB2 XML, or TXT files.
-     */
-    private fun extractChapterContentMap(book: BookEntity): Map<Int, Pair<String, String>> {
-        val result = LinkedHashMap<Int, Pair<String, String>>()
-        runCatching {
-            val uri = Uri.parse(book.fileUri)
-            val inputStream = when (uri.scheme) {
-                "content", "file" -> appContext.contentResolver.openInputStream(uri)
-                else -> File(book.fileUri).takeIf { it.exists() }?.let { FileInputStream(it) }
-            } ?: return result
-
-            inputStream.use { rawStream ->
-                when (book.format) {
-                    BookFormat.EPUB -> {
-                        val htmlEntries = ArrayList<Pair<String, String>>()
-                        ZipInputStream(rawStream.buffered()).use { zis ->
-                            var entry = zis.nextEntry
-                            while (entry != null) {
-                                val lower = entry.name.lowercase()
-                                if (!entry.isDirectory &&
-                                    (lower.endsWith(".xhtml") || lower.endsWith(".html") || lower.endsWith(".htm")) &&
-                                    !lower.contains("nav") && !lower.contains("toc")
-                                ) {
-                                    val bytes = zis.readBytes()
-                                    val html = String(bytes, StandardCharsets.UTF_8)
-                                    val doc = Jsoup.parse(html)
-                                    val title = doc.selectFirst("h1, h2, h3, title")?.text()?.trim()
-                                        ?.takeIf { it.isNotBlank() }
-                                        ?: "Chapter ${htmlEntries.size + 1}"
-                                    val textLen = doc.body()?.text()?.trim()?.length ?: 0
-                                    if (textLen > 40) {
-                                        htmlEntries.add(title to html)
-                                    }
-                                }
-                                zis.closeEntry()
-                                entry = zis.nextEntry
-                            }
-                        }
-                        htmlEntries.forEachIndexed { index, pair ->
-                            result[index] = pair
-                        }
-                    }
-
-                    BookFormat.TXT, BookFormat.FB2, BookFormat.MOBI, BookFormat.AZW3 -> {
-                        val rawBytes = rawStream.readBytes()
-                        val fullText = extractReadableStringFromBinaryOrText(rawBytes)
-                        val chapterSplitRegex = Regex("(?m)^\\s*(?:CHAPTER|Chapter|Book|PART|Part)\\s+[0-9IVXLCDM]+.*$")
-                        val matches = chapterSplitRegex.findAll(fullText).toList()
-                        if (matches.size >= 2) {
-                            for (i in matches.indices) {
-                                val start = matches[i].range.first
-                                val end = if (i + 1 < matches.size) matches[i + 1].range.first else fullText.length
-                                val heading = matches[i].value.trim().lines().firstOrNull()?.trim()
-                                    ?: "Chapter ${i + 1}"
-                                val body = fullText.substring(start, end).trim()
-                                result[i] = heading to body
-                            }
-                        } else {
-                            // Chunk into ~6,000 character chapters
-                            val chunkSize = 6000
-                            var offset = 0
-                            var chIdx = 0
-                            while (offset < fullText.length) {
-                                val end = min(offset + chunkSize, fullText.length)
-                                result[chIdx] = "Chapter ${chIdx + 1}" to fullText.substring(offset, end)
-                                offset = end
-                                chIdx++
-                            }
-                        }
-                    }
-
-                    else -> Unit
-                }
-            }
+    /** Linear resampling so every sentence matches the output sample rate. */
+    private fun resampleLinear(input: FloatArray, fromRateHz: Int, toRateHz: Int): FloatArray {
+        if (fromRateHz <= 0 || fromRateHz == toRateHz || input.isEmpty()) return input
+        val outLength = ((input.size.toLong() * toRateHz) / fromRateHz).toInt().coerceAtLeast(1)
+        val ratio = fromRateHz.toDouble() / toRateHz
+        return FloatArray(outLength) { i ->
+            val src = i * ratio
+            val i0 = src.toInt().coerceIn(0, input.size - 1)
+            val i1 = (i0 + 1).coerceAtMost(input.size - 1)
+            val frac = (src - i0).toFloat()
+            input[i0] * (1f - frac) + input[i1] * frac
         }
-        return result
-    }
-
-    private fun extractReadableStringFromBinaryOrText(bytes: ByteArray): String {
-        val utf8 = String(bytes, StandardCharsets.UTF_8)
-        val htmlIndex = utf8.indexOf("<html", ignoreCase = true)
-            .takeIf { it >= 0 } ?: utf8.indexOf("<body", ignoreCase = true)
-        if (htmlIndex != null && htmlIndex >= 0) {
-            return Jsoup.parse(utf8.substring(htmlIndex)).body().text()
-        }
-        return utf8.replace(Regex("[\\x00-\\x08\\x0B\\x0C\\x0E-\\x1F]"), " ")
-            .replace(Regex("\\s{3,}"), "\n\n")
-            .trim()
-    }
-
-    private fun buildFallbackChapterText(book: BookEntity, chapter: ChapterEntity): String {
-        return """
-            <h1>${chapter.title}</h1>
-            <p>From ${book.title} by ${book.author}.</p>
-            <p>${book.description ?: "This chapter has been prepared for synchronized neural text-to-speech playback and audiobook conversion in OmniRead."}</p>
-            <p>Each sentence is tokenized with exact character offsets and mapped to 24kHz audio timestamps so you can switch seamlessly between reading and listening at any moment.</p>
-        """.trimIndent()
     }
 
     /**
@@ -986,6 +968,10 @@ class BatchAudiobookExportManagerImpl @Inject constructor(
             val existing = current[jobId] ?: return@update current
             current + (jobId to existing.copy(isRunning = false, errorMessage = "Cancelled by user"))
         }
+    }
+
+    fun removeJob(jobId: String) {
+        activeJobsMap.update { current -> if (current[jobId]?.isRunning == true) current else current - jobId }
     }
 
     fun observeAllConversionJobs(): Flow<List<BatchConversionProgress>> {

@@ -1,228 +1,364 @@
 package com.example.data.tts
 
 import android.content.Context
-import android.content.res.AssetManager
 import android.net.Uri
 import android.util.Log
 import com.example.data.local.entity.TtsEngineType
+import com.example.domain.tts.KokoroModelState
 import com.example.domain.tts.LocalKokoroTtsProvider
 import com.example.domain.tts.OfflineTtsKokoroModelConfig
 import com.example.domain.tts.SynthesizedAudioChunk
 import com.example.domain.tts.TtsSynthesisRequest
 import com.example.domain.tts.TtsVoiceProfile
-import com.example.domain.tts.VoiceBlendWeight
 import com.k2fsa.sherpa.onnx.OfflineTts
 import com.k2fsa.sherpa.onnx.OfflineTtsConfig
 import com.k2fsa.sherpa.onnx.OfflineTtsModelConfig
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.channels.awaitClose
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.flow.callbackFlow
+import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOn
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import okhttp3.OkHttpClient
+import okhttp3.Request
+import org.apache.commons.compress.archivers.tar.TarArchiveInputStream
+import org.apache.commons.compress.compressors.bzip2.BZip2CompressorInputStream
 import java.io.File
-import java.io.FileInputStream
 import java.io.FileOutputStream
-import java.nio.ByteBuffer
-import java.nio.ByteOrder
+import java.io.InputStream
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.zip.ZipInputStream
 import javax.inject.Inject
 import javax.inject.Singleton
-import kotlin.math.min
 import com.k2fsa.sherpa.onnx.OfflineTtsKokoroModelConfig as SherpaKokoroModelConfig
 
+/**
+ * On-device Kokoro-82M text-to-speech via the official sherpa-onnx Android library
+ * (`app/libs/sherpa-onnx-*.aar`, arm64-v8a).
+ *
+ * The model (≈130 MB, int8 multi-lang v1.0: model.int8.onnx, voices.bin, tokens.txt,
+ * espeak-ng-data/, lexicons, dict/) is not bundled in the APK – it is downloaded once from the
+ * sherpa-onnx GitHub release (or imported from a file) into app storage.
+ */
 @Singleton
 class LocalKokoroTtsProviderImpl @Inject constructor(
-    @ApplicationContext private val context: Context
+    @ApplicationContext private val context: Context,
+    okHttpClient: OkHttpClient
 ) : LocalKokoroTtsProvider {
 
-    private val ioDispatcher: CoroutineDispatcher = Dispatchers.Default
     private val engineMutex = Mutex()
     private val cancelRequested = AtomicBoolean(false)
-
     private var offlineTts: OfflineTts? = null
 
-    private val defaultModelDir = File(context.filesDir, "models/kokoro-v1.0").apply { mkdirs() }
+    private val downloadClient = okHttpClient.newBuilder()
+        .readTimeout(5, TimeUnit.MINUTES)
+        .build()
+
+    private val modelsRoot = File(context.filesDir, "models")
+    private val defaultModelDir = File(modelsRoot, MODEL_DIR_NAME)
 
     private val _modelConfig = MutableStateFlow(
         OfflineTtsKokoroModelConfig(
             modelDir = defaultModelDir.absolutePath,
-            modelFileName = "kokoro-v1.0.int8.onnx",
+            modelFileName = "model.int8.onnx",
             voicesFileName = "voices.bin",
             tokensFileName = "tokens.txt",
             dataDirName = "espeak-ng-data",
-            lexiconFileNames = "lexicon-us-en.txt,lexicon-gb-en.txt",
+            lexiconFileNames = "lexicon-us-en.txt,lexicon-zh.txt",
             lang = "en-us",
-            numThreads = Runtime.getRuntime().availableProcessors().coerceIn(2, 6),
-            debug = false,
-            provider = "cpu",
-            defaultSpeakerId = 0,
+            numThreads = Runtime.getRuntime().availableProcessors().coerceIn(2, 4),
+            defaultSpeakerId = 3,
             defaultVoiceCode = "af_heart",
             lengthScaleSpeed = 1.0f
         )
     )
     override val modelConfig: StateFlow<OfflineTtsKokoroModelConfig> = _modelConfig.asStateFlow()
 
+    private val _modelState = MutableStateFlow(KokoroModelState())
+    override val modelState: StateFlow<KokoroModelState> = _modelState.asStateFlow()
+
     private val _isReady = MutableStateFlow(false)
     override val isReady: StateFlow<Boolean> = _isReady.asStateFlow()
 
     override val engineType: TtsEngineType = TtsEngineType.LOCAL_KOKORO
 
-    override suspend fun initialize(): Result<Unit> = withContext(ioDispatcher) {
+    init {
+        refreshInstalledState()
+    }
+
+    private fun refreshInstalledState() {
+        val installed = filesPresent(File(_modelConfig.value.modelDir))
+        _modelState.value = KokoroModelState(
+            installed = installed,
+            statusText = if (installed) "Installed" else "Not installed – download the voice model to use Kokoro",
+            installedSizeBytes = if (installed) dirSize(File(_modelConfig.value.modelDir)) else 0L
+        )
+    }
+
+    private fun resolveModelFile(dir: File, configuredName: String): File? {
+        return listOf(configuredName, "model.int8.onnx", "model.onnx", "kokoro-v1.0.int8.onnx", "kokoro-v1.0.onnx")
+            .map { File(dir, it) }
+            .firstOrNull { it.isFile && it.length() > 1_000_000L }
+    }
+
+    private fun filesPresent(dir: File): Boolean {
+        val cfg = _modelConfig.value
+        return resolveModelFile(dir, cfg.modelFileName) != null &&
+            File(dir, cfg.voicesFileName).isFile &&
+            File(dir, cfg.tokensFileName).isFile &&
+            File(dir, cfg.dataDirName).isDirectory
+    }
+
+    override suspend fun verifyModelFilesExist(): Boolean = withContext(Dispatchers.IO) {
+        filesPresent(File(_modelConfig.value.modelDir))
+    }
+
+    override suspend fun initialize(): Result<Unit> = withContext(Dispatchers.Default) {
         engineMutex.withLock {
+            if (offlineTts != null && _isReady.value) return@withLock Result.success(Unit)
             runCatching {
                 val cfg = _modelConfig.value
-                val baseDir = File(cfg.modelDir).apply { mkdirs() }
-
-                // Stage bundled assets from APK assets/kokoro-v1.0 if present
-                stageBundledAssetsIfAvailable(context.assets, "kokoro-v1.0", baseDir)
-
-                // Ensure minimum placeholder metadata files exist so path verification succeeds
-                ensureDirectoryStructure(baseDir, cfg)
-
-                val blendedVoicesFile = if (cfg.voiceBlend.isNotEmpty()) {
-                    buildBlendedVoicesBinFile(baseDir, cfg)
-                } else {
-                    File(baseDir, cfg.voicesFileName)
+                val baseDir = File(cfg.modelDir)
+                // sherpa-onnx aborts the whole process on missing files, so verify first.
+                val modelFile = resolveModelFile(baseDir, cfg.modelFileName)
+                if (modelFile == null || !filesPresent(baseDir)) {
+                    throw IllegalStateException(
+                        "Kokoro voice model is not installed. Open TTS Studio and tap \"Download model\"."
+                    )
                 }
 
-                val lexiconPaths = cfg.lexiconFileNames
-                    .split(",")
+                val lexiconPaths = cfg.lexiconFileNames.split(",")
                     .map { it.trim() }
                     .filter { it.isNotEmpty() }
                     .map { File(baseDir, it) }
-                    .filter { it.exists() }
+                    .filter { it.isFile }
                     .joinToString(",") { it.absolutePath }
-
-                val sherpaKokoroConfig = SherpaKokoroModelConfig(
-                    model = resolveModelFile(baseDir, cfg.modelFileName).absolutePath,
-                    voices = blendedVoicesFile.absolutePath,
-                    tokens = File(baseDir, cfg.tokensFileName).absolutePath,
-                    dataDir = File(baseDir, cfg.dataDirName).absolutePath,
-                    lengthScale = (1.0f / cfg.lengthScaleSpeed.coerceIn(0.25f, 4.0f)),
-                    dictDir = File(baseDir, "dict").takeIf { it.exists() }?.absolutePath ?: "",
-                    lexicon = lexiconPaths,
-                    lang = cfg.lang
-                )
 
                 val sherpaConfig = OfflineTtsConfig(
                     model = OfflineTtsModelConfig(
-                        kokoro = sherpaKokoroConfig,
+                        kokoro = SherpaKokoroModelConfig(
+                            model = modelFile.absolutePath,
+                            voices = File(baseDir, cfg.voicesFileName).absolutePath,
+                            tokens = File(baseDir, cfg.tokensFileName).absolutePath,
+                            dataDir = File(baseDir, cfg.dataDirName).absolutePath,
+                            lexicon = lexiconPaths,
+                            lang = cfg.lang,
+                            dictDir = File(baseDir, "dict").takeIf { it.isDirectory }?.absolutePath.orEmpty(),
+                            lengthScale = 1.0f / cfg.lengthScaleSpeed.coerceIn(0.25f, 4.0f)
+                        ),
                         numThreads = cfg.numThreads.coerceIn(1, 8),
                         debug = cfg.debug,
-                        provider = cfg.provider
+                        provider = "cpu"
                     ),
                     maxNumSentences = 1,
                     silenceScale = 0.2f
                 )
 
-                offlineTts?.free()
-                offlineTts = OfflineTts(assetManager = null, config = sherpaConfig)
+                offlineTts?.release()
+                offlineTts = OfflineTts(config = sherpaConfig)
                 _isReady.value = true
+                Log.i(TAG, "Kokoro ready: ${offlineTts?.numSpeakers()} speakers @ ${offlineTts?.sampleRate()} Hz")
+                Unit
             }.onFailure { error ->
-                Log.e(TAG, "Failed to initialize LocalKokoroTtsProvider", error)
+                Log.e(TAG, "Failed to initialize Kokoro", error)
                 _isReady.value = false
             }
         }
     }
 
-    override suspend fun updateKokoroModelConfig(
-        config: OfflineTtsKokoroModelConfig
-    ): Result<Unit> {
+    override suspend fun updateKokoroModelConfig(config: OfflineTtsKokoroModelConfig): Result<Unit> {
+        engineMutex.withLock {
+            offlineTts?.release()
+            offlineTts = null
+            _isReady.value = false
+        }
         _modelConfig.value = config
+        refreshInstalledState()
         return initialize()
     }
 
-    override suspend fun verifyModelFilesExist(): Boolean = withContext(ioDispatcher) {
-        val cfg = _modelConfig.value
-        val dir = File(cfg.modelDir)
-        val modelFile = resolveModelFile(dir, cfg.modelFileName)
-        val voicesFile = File(dir, cfg.voicesFileName)
-        val tokensFile = File(dir, cfg.tokensFileName)
-        val espeakDir = File(dir, cfg.dataDirName)
-        modelFile.exists() && voicesFile.exists() && tokensFile.exists() && espeakDir.exists()
+    // ---------------------------------------------------------------------------------------
+    // Model installation
+    // ---------------------------------------------------------------------------------------
+
+    override suspend fun downloadAndInstallModel(): Result<Unit> = withContext(Dispatchers.IO) {
+        runCatching {
+            _modelState.update {
+                it.copy(busy = true, progress = 0f, statusText = "Connecting…", errorMessage = null)
+            }
+            modelsRoot.mkdirs()
+            val archive = File(context.cacheDir, "kokoro-model-download.tar.bz2")
+            val request = Request.Builder().url(MODEL_DOWNLOAD_URL).build()
+            downloadClient.newCall(request).execute().use { response ->
+                if (!response.isSuccessful) throw IllegalStateException("Download failed: HTTP ${response.code}")
+                val body = response.body ?: throw IllegalStateException("Empty download response")
+                val total = body.contentLength().takeIf { it > 0 } ?: MODEL_APPROX_BYTES
+                body.byteStream().use { input ->
+                    FileOutputStream(archive).use { out ->
+                        val buf = ByteArray(64 * 1024)
+                        var done = 0L
+                        var lastReport = 0L
+                        while (true) {
+                            currentCoroutineContext().ensureActive()
+                            val n = input.read(buf)
+                            if (n < 0) break
+                            out.write(buf, 0, n)
+                            done += n
+                            if (done - lastReport > 512 * 1024) {
+                                lastReport = done
+                                _modelState.update {
+                                    it.copy(
+                                        progress = (done.toFloat() / total).coerceIn(0f, 1f),
+                                        statusText = "Downloading ${done / 1_048_576} / ${total / 1_048_576} MB"
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            archive.inputStream().use { installFromArchiveStream(it, isZip = false) }
+            archive.delete()
+        }.onFailure { err ->
+            Log.e(TAG, "Kokoro model download failed", err)
+            _modelState.update {
+                it.copy(busy = false, progress = null, errorMessage = err.message ?: "Download failed")
+            }
+            if (err is CancellationException) throw err
+        }.map { }
     }
 
     override suspend fun installBundledOrDownloadedModel(
         sourceArchiveUri: String
-    ): Result<OfflineTtsKokoroModelConfig> = withContext(ioDispatcher) {
+    ): Result<OfflineTtsKokoroModelConfig> = withContext(Dispatchers.IO) {
         runCatching {
-            val targetDir = File(_modelConfig.value.modelDir).apply { mkdirs() }
+            _modelState.update { it.copy(busy = true, progress = null, statusText = "Reading archive…", errorMessage = null) }
             val uri = Uri.parse(sourceArchiveUri)
-            val inputStream = when (uri.scheme) {
-                "content", "file" -> context.contentResolver.openInputStream(uri)
-                else -> File(sourceArchiveUri).takeIf { it.exists() }?.let { FileInputStream(it) }
-            } ?: throw IllegalArgumentException("Unable to open model archive URI: $sourceArchiveUri")
-
-            inputStream.use { rawIn ->
-                ZipInputStream(rawIn.buffered()).use { zis ->
-                    var entry = zis.nextEntry
-                    while (entry != null) {
-                        val normalizedName = entry.name
-                            .removePrefix("kokoro-v1.0/")
-                            .removePrefix("kokoro-int8-en-v0_19/")
-                            .removePrefix("kokoro-multi-lang-v1_0/")
-                        if (normalizedName.isNotBlank() && !normalizedName.contains("..")) {
-                            val outFile = File(targetDir, normalizedName)
-                            if (entry.isDirectory) {
-                                outFile.mkdirs()
-                            } else {
-                                outFile.parentFile?.mkdirs()
-                                FileOutputStream(outFile).use { fos ->
-                                    zis.copyTo(fos, bufferSize = 32 * 1024)
-                                }
-                            }
-                        }
-                        zis.closeEntry()
-                        entry = zis.nextEntry
-                    }
-                }
+            val head = context.contentResolver.openInputStream(uri)?.use { s ->
+                ByteArray(4).also { s.read(it) }
+            } ?: throw IllegalArgumentException("Unable to open the selected file")
+            val isZip = head[0] == 'P'.code.toByte() && head[1] == 'K'.code.toByte()
+            val isBz2 = head[0] == 'B'.code.toByte() && head[1] == 'Z'.code.toByte() && head[2] == 'h'.code.toByte()
+            if (!isZip && !isBz2) {
+                throw IllegalArgumentException("Pick the kokoro .tar.bz2 from sherpa-onnx releases (or a .zip of that folder)")
             }
-
-            val updatedConfig = _modelConfig.value.copy(modelDir = targetDir.absolutePath)
-            updateKokoroModelConfig(updatedConfig).getOrThrow()
-            updatedConfig
+            context.contentResolver.openInputStream(uri)!!.use { installFromArchiveStream(it, isZip) }
+            _modelConfig.value
+        }.onFailure { err ->
+            _modelState.update { it.copy(busy = false, progress = null, errorMessage = err.message ?: "Import failed") }
         }
     }
+
+    /** Extracts a model archive into a staging dir, verifies it, then swaps it in atomically. */
+    private suspend fun installFromArchiveStream(input: InputStream, isZip: Boolean) {
+        _modelState.update { it.copy(busy = true, progress = null, statusText = "Unpacking model…") }
+        val staging = File(modelsRoot, "$MODEL_DIR_NAME.staging").apply { deleteRecursively(); mkdirs() }
+
+        fun target(entryName: String): File? {
+            // Strip the archive's top-level folder (e.g. "kokoro-int8-multi-lang-v1_0/")
+            val parts = entryName.replace('\\', '/').split('/').filter { it.isNotEmpty() && it != "." }
+            if (parts.isEmpty() || parts.any { it == ".." }) return null
+            val relative = if (parts.size > 1) parts.drop(1).joinToString("/") else parts[0]
+            return File(staging, relative)
+        }
+
+        if (isZip) {
+            ZipInputStream(input.buffered()).use { zis ->
+                var entry = zis.nextEntry
+                while (entry != null) {
+                    currentCoroutineContext().ensureActive()
+                    val out = target(entry.name)
+                    if (out != null) {
+                        if (entry.isDirectory) out.mkdirs() else {
+                            out.parentFile?.mkdirs()
+                            FileOutputStream(out).use { zis.copyTo(it, 64 * 1024) }
+                        }
+                    }
+                    entry = zis.nextEntry
+                }
+            }
+        } else {
+            TarArchiveInputStream(BZip2CompressorInputStream(input.buffered(256 * 1024))).use { tar ->
+                var entry = tar.nextEntry
+                while (entry != null) {
+                    currentCoroutineContext().ensureActive()
+                    val out = target(entry.name)
+                    if (out != null) {
+                        if (entry.isDirectory) out.mkdirs() else {
+                            out.parentFile?.mkdirs()
+                            FileOutputStream(out).use { tar.copyTo(it, 64 * 1024) }
+                        }
+                    }
+                    entry = tar.nextEntry
+                }
+            }
+        }
+
+        // A zip of the folder itself (no top-level dir) puts files one level too deep-stripped; handle both.
+        val root = if (filesPresent(staging)) staging else staging.listFiles()?.firstOrNull { it.isDirectory && filesPresent(it) }
+            ?: throw IllegalStateException("Archive is missing model.onnx / voices.bin / tokens.txt / espeak-ng-data")
+
+        engineMutex.withLock {
+            offlineTts?.release()
+            offlineTts = null
+            _isReady.value = false
+            defaultModelDir.deleteRecursively()
+            if (!root.renameTo(defaultModelDir)) {
+                root.copyRecursively(defaultModelDir, overwrite = true)
+            }
+            staging.deleteRecursively()
+        }
+        _modelConfig.update { it.copy(modelDir = defaultModelDir.absolutePath) }
+        refreshInstalledState()
+        _modelState.update { it.copy(busy = false, progress = null, statusText = "Installed") }
+    }
+
+    override suspend fun deleteInstalledModel() {
+        engineMutex.withLock {
+            offlineTts?.release()
+            offlineTts = null
+            _isReady.value = false
+        }
+        withContext(Dispatchers.IO) { defaultModelDir.deleteRecursively() }
+        refreshInstalledState()
+    }
+
+    private fun dirSize(dir: File): Long = dir.walkTopDown().filter { it.isFile }.sumOf { it.length() }
+
+    // ---------------------------------------------------------------------------------------
+    // Synthesis
+    // ---------------------------------------------------------------------------------------
 
     override suspend fun availableVoices(): List<TtsVoiceProfile> = KOKORO_V1_VOICE_CATALOG
 
     override suspend fun synthesizeSentence(
         request: TtsSynthesisRequest
-    ): Result<SynthesizedAudioChunk> = withContext(ioDispatcher) {
+    ): Result<SynthesizedAudioChunk> = withContext(Dispatchers.Default) {
         runCatching {
-            if (!_isReady.value || offlineTts == null) {
-                initialize().getOrThrow()
-            }
-            val engine = offlineTts ?: throw IllegalStateException("Kokoro OfflineTts instance is null")
+            initialize().getOrThrow()
             cancelRequested.set(false)
-
-            val resolvedSpeakerId = resolveSpeakerId(request.voiceId, request.speakerId)
-            val effectiveSpeed = request.speed.coerceIn(0.5f, 3.5f)
-
             val generated = engineMutex.withLock {
-                engine.generateWithCallback(
+                val engine = offlineTts ?: throw IllegalStateException("Kokoro engine is not loaded")
+                // NOTE: don't use generateWithCallback – its JNI layer looks up a typed
+                // `invoke([F)Ljava/lang/Integer;` method that Kotlin 2.x lambdas don't have,
+                // which aborts the whole process. Sentences are short, so plain generate() is fine.
+                engine.generate(
                     text = request.text,
-                    sid = resolvedSpeakerId,
-                    speed = effectiveSpeed
-                ) { _ ->
-                    if (cancelRequested.get()) 0 else 1
-                }
+                    sid = resolveSpeakerId(request.voiceId, request.speakerId),
+                    speed = request.speed.coerceIn(0.5f, 3.0f)
+                )
             }
-
-            if (cancelRequested.get()) {
-                throw CancellationException("Kokoro synthesis cancelled for ${request.requestId}")
-            }
-
+            if (cancelRequested.get()) throw CancellationException("Kokoro synthesis cancelled")
             SynthesizedAudioChunk(
                 requestId = request.requestId,
                 sentenceLocator = request.sentenceLocator,
@@ -233,47 +369,9 @@ class LocalKokoroTtsProviderImpl @Inject constructor(
         }
     }
 
-    override fun synthesizeStream(
-        request: TtsSynthesisRequest
-    ): Flow<SynthesizedAudioChunk> = callbackFlow {
-        if (!_isReady.value || offlineTts == null) {
-            initialize().getOrThrow()
-        }
-        val engine = offlineTts ?: throw IllegalStateException("Kokoro OfflineTts is not initialized")
-        cancelRequested.set(false)
-
-        val resolvedSpeakerId = resolveSpeakerId(request.voiceId, request.speakerId)
-        val effectiveSpeed = request.speed.coerceIn(0.5f, 3.5f)
-        var chunkCounter = 0
-
-        engineMutex.withLock {
-            engine.generateWithCallback(
-                text = request.text,
-                sid = resolvedSpeakerId,
-                speed = effectiveSpeed
-            ) { pcmSamples ->
-                if (cancelRequested.get() || !isClosedForSend) {
-                    val copiedSamples = pcmSamples.copyOf()
-                    val chunk = SynthesizedAudioChunk(
-                        requestId = "${request.requestId}_part_${chunkCounter++}",
-                        sentenceLocator = request.sentenceLocator,
-                        pcmFloatSamples = copiedSamples,
-                        sampleRateHz = SAMPLE_RATE_24KHZ,
-                        channels = 1
-                    )
-                    val sendResult = trySend(chunk)
-                    if (cancelRequested.get() || sendResult.isClosed) 0 else 1
-                } else {
-                    0
-                }
-            }
-        }
-
-        close()
-        awaitClose {
-            cancelRequested.set(true)
-        }
-    }.flowOn(ioDispatcher)
+    override fun synthesizeStream(request: TtsSynthesisRequest): Flow<SynthesizedAudioChunk> = flow {
+        emit(synthesizeSentence(request).getOrThrow())
+    }.flowOn(Dispatchers.Default)
 
     override fun cancelActiveSynthesis() {
         cancelRequested.set(true)
@@ -281,203 +379,86 @@ class LocalKokoroTtsProviderImpl @Inject constructor(
 
     override fun release() {
         cancelRequested.set(true)
-        offlineTts?.free()
+        offlineTts?.release()
         offlineTts = null
         _isReady.value = false
     }
 
     private fun resolveSpeakerId(voiceId: String, fallbackSpeakerId: Int): Int {
-        val matched = KOKORO_V1_VOICE_CATALOG.firstOrNull {
-            it.id.equals(voiceId, ignoreCase = true)
-        }
-        return matched?.speakerIndex ?: fallbackSpeakerId.coerceIn(0, KOKORO_V1_VOICE_CATALOG.size - 1)
-    }
-
-    private fun resolveModelFile(baseDir: File, configuredName: String): File {
-        val primary = File(baseDir, configuredName)
-        if (primary.exists()) return primary
-        val candidates = listOf(
-            "kokoro-v1.0.int8.onnx",
-            "kokoro-v1.0.onnx",
-            "model.int8.onnx",
-            "model.onnx"
-        )
-        return candidates.map { File(baseDir, it) }.firstOrNull { it.exists() } ?: primary
-    }
-
-    private fun stageBundledAssetsIfAvailable(
-        assetManager: AssetManager,
-        assetPath: String,
-        destDir: File
-    ) {
-        runCatching {
-            val children = assetManager.list(assetPath) ?: return
-            if (children.isEmpty()) return
-            destDir.mkdirs()
-            for (child in children) {
-                val childAssetPath = "$assetPath/$child"
-                val destFile = File(destDir, child)
-                val grandChildren = assetManager.list(childAssetPath)
-                if (!grandChildren.isNullOrEmpty()) {
-                    stageBundledAssetsIfAvailable(assetManager, childAssetPath, destFile)
-                } else if (!destFile.exists() || destFile.length() == 0L) {
-                    assetManager.open(childAssetPath).use { input ->
-                        FileOutputStream(destFile).use { output ->
-                            input.copyTo(output)
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    private fun ensureDirectoryStructure(baseDir: File, cfg: OfflineTtsKokoroModelConfig) {
-        val espeakDir = File(baseDir, cfg.dataDirName)
-        if (!espeakDir.exists()) {
-            espeakDir.mkdirs()
-        }
-        val tokensFile = File(baseDir, cfg.tokensFileName)
-        if (!tokensFile.exists()) {
-            runCatching {
-                tokensFile.writeText(DEFAULT_KOKORO_TOKENS)
-            }
-        }
-    }
-
-    /**
-     * Blends multiple speaker embedding vectors in `voices.bin` according to user-configured
-     * [VoiceBlendWeight]s and writes a fused `voices_blended.bin` for `OfflineTts`.
-     */
-    private fun buildBlendedVoicesBinFile(
-        baseDir: File,
-        cfg: OfflineTtsKokoroModelConfig
-    ): File {
-        val sourceVoicesFile = File(baseDir, cfg.voicesFileName)
-        if (!sourceVoicesFile.exists() || cfg.voiceBlend.isEmpty()) {
-            return sourceVoicesFile
-        }
-        return runCatching {
-            val rawBytes = sourceVoicesFile.readBytes()
-            val floatCount = rawBytes.size / 4
-            val speakerCount = KOKORO_V1_VOICE_CATALOG.size.coerceAtLeast(1)
-            val floatsPerSpeaker = floatCount / speakerCount
-            if (floatsPerSpeaker <= 0) return sourceVoicesFile
-
-            val allFloats = FloatArray(floatCount)
-            ByteBuffer.wrap(rawBytes).order(ByteOrder.LITTLE_ENDIAN).asFloatBuffer().get(allFloats)
-
-            val totalWeight = cfg.voiceBlend.sumOf { it.weight.toDouble() }.toFloat().coerceAtLeast(0.001f)
-            val blendedVector = FloatArray(floatsPerSpeaker)
-
-            for (blend in cfg.voiceBlend) {
-                val normalizedWeight = blend.weight / totalWeight
-                val spkIdx = blend.speakerIndex.coerceIn(0, speakerCount - 1)
-                val startOffset = spkIdx * floatsPerSpeaker
-                val limit = min(floatsPerSpeaker, allFloats.size - startOffset)
-                for (i in 0 until limit) {
-                    blendedVector[i] += allFloats[startOffset + i] * normalizedWeight
-                }
-            }
-
-            // Overwrite the default speaker slot in a dedicated blended voices file
-            val targetSpk = cfg.defaultSpeakerId.coerceIn(0, speakerCount - 1)
-            System.arraycopy(
-                blendedVector,
-                0,
-                allFloats,
-                targetSpk * floatsPerSpeaker,
-                min(floatsPerSpeaker, allFloats.size - targetSpk * floatsPerSpeaker)
-            )
-
-            val outFile = File(baseDir, "voices_blended.bin")
-            val outBytes = ByteBuffer.allocate(allFloats.size * 4).order(ByteOrder.LITTLE_ENDIAN)
-            outBytes.asFloatBuffer().put(allFloats)
-            outFile.writeBytes(outBytes.array())
-            outFile
-        }.getOrDefault(sourceVoicesFile)
+        return KOKORO_V1_VOICE_CATALOG.firstOrNull { it.id.equals(voiceId, ignoreCase = true) }?.speakerIndex
+            ?: fallbackSpeakerId.coerceIn(0, KOKORO_V1_VOICE_CATALOG.size - 1)
     }
 
     companion object {
         private const val TAG = "LocalKokoroTtsProvider"
         const val SAMPLE_RATE_24KHZ = 24000
 
-        private val DEFAULT_KOKORO_TOKENS = buildString {
-            val symbols = listOf(
-                "$", ";", ":", ",", ".", "!", "?", "¡", "¿", "—", "…", "\"", "(", ")", "“", "”",
-                " ", "A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M", "N", "O",
-                "P", "Q", "R", "S", "T", "U", "V", "W", "X", "Y", "Z", "a", "b", "c", "d", "e",
-                "f", "g", "h", "i", "j", "k", "l", "m", "n", "o", "p", "q", "r", "s", "t", "u",
-                "v", "w", "x", "y", "z", "ɑ", "ɐ", "ɒ", "æ", "ɓ", "ʙ", "β", "ɔ", "ɕ", "ç", "ɗ",
-                "ɖ", "ð", "ʤ", "ə", "ɘ", "ɚ", "ɛ", "ɜ", "ɝ", "ɞ", "ɟ", "ʄ", "ɡ", "ɠ", "ɢ", "ʛ",
-                "ɦ", "ɧ", "ħ", "ɥ", "ʜ", "ɨ", "ɪ", "ʝ", "ɭ", "ɬ", "ɫ", "ɮ", "ʟ", "ɱ", "ɯ", "ɰ",
-                "ŋ", "ɳ", "ɲ", "ɴ", "ø", "ɵ", "ɸ", "θ", "œ", "ɶ", "ʘ", "ɹ", "ɺ", "ɾ", "ɻ", "ʀ",
-                "ʁ", "ɽ", "ʂ", "ʃ", "ʈ", "ʧ", "ʉ", "ʊ", "ʋ", "ⱱ", "ʌ", "ɣ", "ɤ", "ʍ", "χ", "ʎ",
-                "ʏ", "ʑ", "ʐ", "ʒ", "ʔ", "ʡ", "ʕ", "ʢ", "ǀ", "ǁ", "ǂ", "ǃ", "ˈ", "ˌ", "ː", "ˑ"
-            )
-            symbols.forEachIndexed { idx, sym ->
-                append(sym).append(' ').append(idx).append('\n')
-            }
-        }
+        private const val MODEL_DIR_NAME = "kokoro-int8-multi-lang-v1_0"
+        const val MODEL_DOWNLOAD_URL =
+            "https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/kokoro-int8-multi-lang-v1_0.tar.bz2"
+        const val MODEL_APPROX_BYTES = 132_353_410L
 
+        private fun v(id: String, sid: Int, name: String, lang: String, gender: String) =
+            TtsVoiceProfile(id = id, speakerIndex = sid, name = name, languageCode = lang, gender = gender)
+
+        /**
+         * Speaker IDs of sherpa-onnx `kokoro-multi-lang-v1_0` (53 speakers, IDs 0–52), see
+         * https://k2-fsa.github.io/sherpa/onnx/tts/pretrained_models/kokoro.html
+         */
         val KOKORO_V1_VOICE_CATALOG: List<TtsVoiceProfile> = listOf(
-            // American English Female (0..19)
-            TtsVoiceProfile("af_alloy", 0, "Alloy (US Female)", "en-US", "Female"),
-            TtsVoiceProfile("af_aoede", 1, "Aoede (US Female)", "en-US", "Female"),
-            TtsVoiceProfile("af_bella", 2, "Bella (US Female)", "en-US", "Female"),
-            TtsVoiceProfile("af_heart", 3, "Heart (US Female - Flagship)", "en-US", "Female"),
-            TtsVoiceProfile("af_jessica", 4, "Jessica (US Female)", "en-US", "Female"),
-            TtsVoiceProfile("af_kore", 5, "Kore (US Female)", "en-US", "Female"),
-            TtsVoiceProfile("af_nicole", 6, "Nicole (US Whisper/ASMR)", "en-US", "Female"),
-            TtsVoiceProfile("af_nova", 7, "Nova (US Female)", "en-US", "Female"),
-            TtsVoiceProfile("af_river", 8, "River (US Female)", "en-US", "Female"),
-            TtsVoiceProfile("af_sarah", 9, "Sarah (US Female)", "en-US", "Female"),
-            TtsVoiceProfile("af_sky", 10, "Sky (US Female)", "en-US", "Female"),
-            // American English Male (11..19)
-            TtsVoiceProfile("am_adam", 11, "Adam (US Male - Narrator)", "en-US", "Male"),
-            TtsVoiceProfile("am_echo", 12, "Echo (US Male)", "en-US", "Male"),
-            TtsVoiceProfile("am_eric", 13, "Eric (US Male)", "en-US", "Male"),
-            TtsVoiceProfile("am_fenrir", 14, "Fenrir (US Male Deep)", "en-US", "Male"),
-            TtsVoiceProfile("am_liam", 15, "Liam (US Male)", "en-US", "Male"),
-            TtsVoiceProfile("am_michael", 16, "Michael (US Male - Audiobook)", "en-US", "Male"),
-            TtsVoiceProfile("am_onyx", 17, "Onyx (US Male)", "en-US", "Male"),
-            TtsVoiceProfile("am_puck", 18, "Puck (US Male)", "en-US", "Male"),
-            TtsVoiceProfile("am_santa", 19, "Santa (US Male Warm)", "en-US", "Male"),
-            // British English Female & Male (20..27)
-            TtsVoiceProfile("bf_alice", 20, "Alice (UK Female)", "en-GB", "Female"),
-            TtsVoiceProfile("bf_emma", 21, "Emma (UK Female - Classic)", "en-GB", "Female"),
-            TtsVoiceProfile("bf_isabella", 22, "Isabella (UK Female)", "en-GB", "Female"),
-            TtsVoiceProfile("bf_lily", 23, "Lily (UK Female)", "en-GB", "Female"),
-            TtsVoiceProfile("bm_daniel", 24, "Daniel (UK Male)", "en-GB", "Male"),
-            TtsVoiceProfile("bm_fable", 25, "Fable (UK Male)", "en-GB", "Male"),
-            TtsVoiceProfile("bm_george", 26, "George (UK Male - Classic)", "en-GB", "Male"),
-            TtsVoiceProfile("bm_lewis", 27, "Lewis (UK Male)", "en-GB", "Male"),
-            // Multilingual Voices (Japanese, Mandarin, Spanish, French, Hindi, Italian, Portuguese) (28..53)
-            TtsVoiceProfile("jf_alpha", 28, "Alpha (Japanese Female)", "ja-JP", "Female"),
-            TtsVoiceProfile("jf_gongitsune", 29, "Gongitsune (Japanese Female)", "ja-JP", "Female"),
-            TtsVoiceProfile("jf_nezumi", 30, "Nezumi (Japanese Female)", "ja-JP", "Female"),
-            TtsVoiceProfile("jf_tebukuro", 31, "Tebukuro (Japanese Female)", "ja-JP", "Female"),
-            TtsVoiceProfile("jm_kumo", 32, "Kumo (Japanese Male)", "ja-JP", "Male"),
-            TtsVoiceProfile("zf_xiaobei", 33, "Xiaobei (Mandarin Female)", "zh-CN", "Female"),
-            TtsVoiceProfile("zf_xiaoni", 34, "Xiaoni (Mandarin Female)", "zh-CN", "Female"),
-            TtsVoiceProfile("zf_xiaoxiao", 35, "Xiaoxiao (Mandarin Female)", "zh-CN", "Female"),
-            TtsVoiceProfile("zf_xiaoyi", 36, "Xiaoyi (Mandarin Female)", "zh-CN", "Female"),
-            TtsVoiceProfile("zm_yunjian", 37, "Yunjian (Mandarin Male)", "zh-CN", "Male"),
-            TtsVoiceProfile("zm_yunxi", 38, "Yunxi (Mandarin Male)", "zh-CN", "Male"),
-            TtsVoiceProfile("zm_yunxia", 39, "Yunxia (Mandarin Male)", "zh-CN", "Male"),
-            TtsVoiceProfile("zm_yunyang", 40, "Yunyang (Mandarin Male)", "zh-CN", "Male"),
-            TtsVoiceProfile("ef_dora", 41, "Dora (Spanish Female)", "es-ES", "Female"),
-            TtsVoiceProfile("em_alex", 42, "Alex (Spanish Male)", "es-ES", "Male"),
-            TtsVoiceProfile("em_santa", 43, "Santa (Spanish Male)", "es-ES", "Male"),
-            TtsVoiceProfile("ff_siwis", 44, "Siwis (French Female)", "fr-FR", "Female"),
-            TtsVoiceProfile("hf_alpha", 45, "Alpha (Hindi Female)", "hi-IN", "Female"),
-            TtsVoiceProfile("hf_beta", 46, "Beta (Hindi Female)", "hi-IN", "Female"),
-            TtsVoiceProfile("hm_omega", 47, "Omega (Hindi Male)", "hi-IN", "Male"),
-            TtsVoiceProfile("hm_psi", 48, "Psi (Hindi Male)", "hi-IN", "Male"),
-            TtsVoiceProfile("if_sara", 49, "Sara (Italian Female)", "it-IT", "Female"),
-            TtsVoiceProfile("im_nicola", 50, "Nicola (Italian Male)", "it-IT", "Male"),
-            TtsVoiceProfile("pf_dora", 51, "Dora (Portuguese Female)", "pt-BR", "Female"),
-            TtsVoiceProfile("pm_alex", 52, "Alex (Portuguese Male)", "pt-BR", "Male"),
-            TtsVoiceProfile("pm_santa", 53, "Santa (Portuguese Male)", "pt-BR", "Male")
+            v("af_alloy", 0, "Alloy", "en-US", "Female"),
+            v("af_aoede", 1, "Aoede", "en-US", "Female"),
+            v("af_bella", 2, "Bella", "en-US", "Female"),
+            v("af_heart", 3, "Heart", "en-US", "Female"),
+            v("af_jessica", 4, "Jessica", "en-US", "Female"),
+            v("af_kore", 5, "Kore", "en-US", "Female"),
+            v("af_nicole", 6, "Nicole", "en-US", "Female"),
+            v("af_nova", 7, "Nova", "en-US", "Female"),
+            v("af_river", 8, "River", "en-US", "Female"),
+            v("af_sarah", 9, "Sarah", "en-US", "Female"),
+            v("af_sky", 10, "Sky", "en-US", "Female"),
+            v("am_adam", 11, "Adam", "en-US", "Male"),
+            v("am_echo", 12, "Echo", "en-US", "Male"),
+            v("am_eric", 13, "Eric", "en-US", "Male"),
+            v("am_fenrir", 14, "Fenrir", "en-US", "Male"),
+            v("am_liam", 15, "Liam", "en-US", "Male"),
+            v("am_michael", 16, "Michael", "en-US", "Male"),
+            v("am_onyx", 17, "Onyx", "en-US", "Male"),
+            v("am_puck", 18, "Puck", "en-US", "Male"),
+            v("am_santa", 19, "Santa", "en-US", "Male"),
+            v("bf_alice", 20, "Alice", "en-GB", "Female"),
+            v("bf_emma", 21, "Emma", "en-GB", "Female"),
+            v("bf_isabella", 22, "Isabella", "en-GB", "Female"),
+            v("bf_lily", 23, "Lily", "en-GB", "Female"),
+            v("bm_daniel", 24, "Daniel", "en-GB", "Male"),
+            v("bm_fable", 25, "Fable", "en-GB", "Male"),
+            v("bm_george", 26, "George", "en-GB", "Male"),
+            v("bm_lewis", 27, "Lewis", "en-GB", "Male"),
+            v("ef_dora", 28, "Dora", "es", "Female"),
+            v("em_alex", 29, "Alex", "es", "Male"),
+            v("ff_siwis", 30, "Siwis", "fr", "Female"),
+            v("hf_alpha", 31, "Alpha", "hi", "Female"),
+            v("hf_beta", 32, "Beta", "hi", "Female"),
+            v("hm_omega", 33, "Omega", "hi", "Male"),
+            v("hm_psi", 34, "Psi", "hi", "Male"),
+            v("if_sara", 35, "Sara", "it", "Female"),
+            v("im_nicola", 36, "Nicola", "it", "Male"),
+            v("jf_alpha", 37, "Alpha", "ja", "Female"),
+            v("jf_gongitsune", 38, "Gongitsune", "ja", "Female"),
+            v("jf_nezumi", 39, "Nezumi", "ja", "Female"),
+            v("jf_tebukuro", 40, "Tebukuro", "ja", "Female"),
+            v("jm_kumo", 41, "Kumo", "ja", "Male"),
+            v("pf_dora", 42, "Dora", "pt-BR", "Female"),
+            v("pm_alex", 43, "Alex", "pt-BR", "Male"),
+            v("pm_santa", 44, "Santa", "pt-BR", "Male"),
+            v("zf_xiaobei", 45, "Xiaobei", "zh", "Female"),
+            v("zf_xiaoni", 46, "Xiaoni", "zh", "Female"),
+            v("zf_xiaoxiao", 47, "Xiaoxiao", "zh", "Female"),
+            v("zf_xiaoyi", 48, "Xiaoyi", "zh", "Female"),
+            v("zm_yunjian", 49, "Yunjian", "zh", "Male"),
+            v("zm_yunxi", 50, "Yunxi", "zh", "Male"),
+            v("zm_yunxia", 51, "Yunxia", "zh", "Male"),
+            v("zm_yunyang", 52, "Yunyang", "zh", "Male")
         )
     }
 }

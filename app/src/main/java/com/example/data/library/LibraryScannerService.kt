@@ -8,6 +8,7 @@ import android.graphics.pdf.PdfRenderer
 import android.media.MediaMetadataRetriever
 import android.net.Uri
 import android.os.ParcelFileDescriptor
+import android.provider.DocumentsContract
 import android.util.Log
 import androidx.datastore.core.DataStore
 import androidx.datastore.preferences.core.Preferences
@@ -58,6 +59,11 @@ class LibraryScannerService @Inject constructor(
     private val ioDispatcher: CoroutineDispatcher = Dispatchers.IO
     private val coversDir = File(context.filesDir, "covers").apply { mkdirs() }
 
+    private val _scanProgress = kotlinx.coroutines.flow.MutableStateFlow<String?>(null)
+
+    /** Human-readable progress while a folder scan is running (null when idle). */
+    val scanProgress: kotlinx.coroutines.flow.StateFlow<String?> = _scanProgress
+
     val watchedFolderUris: Flow<Set<String>> = dataStore.data.map { prefs ->
         prefs[KEY_WATCHED_FOLDER_URIS] ?: emptySet()
     }
@@ -67,10 +73,7 @@ class LibraryScannerService @Inject constructor(
             runCatching {
                 val treeUri = Uri.parse(treeUriString)
                 runCatching {
-                    context.contentResolver.takePersistableUriPermission(
-                        treeUri,
-                        Intent.FLAG_GRANT_READ_URI_PERMISSION
-                    )
+                    persistAccess(treeUri)
                 }
                 dataStore.edit { prefs ->
                     val existing = prefs[KEY_WATCHED_FOLDER_URIS] ?: emptySet()
@@ -106,10 +109,7 @@ class LibraryScannerService @Inject constructor(
             runCatching {
                 val uri = Uri.parse(uriString)
                 runCatching {
-                    context.contentResolver.takePersistableUriPermission(
-                        uri,
-                        Intent.FLAG_GRANT_READ_URI_PERMISSION
-                    )
+                    persistAccess(uri)
                 }
                 val docFile = DocumentFile.fromSingleUri(context, uri)
                 val fileName = docFile?.name ?: uri.lastPathSegment?.substringAfterLast('/') ?: "ImportedBook.epub"
@@ -123,53 +123,108 @@ class LibraryScannerService @Inject constructor(
             }
         }
 
+    private data class SafEntry(
+        val documentId: String,
+        val name: String,
+        val mimeType: String,
+        val size: Long,
+        val uri: Uri
+    ) {
+        val isDirectory: Boolean get() = mimeType == DocumentsContract.Document.MIME_TYPE_DIR
+    }
+
+    /** Lists one SAF directory with a single query (much faster than DocumentFile.listFiles()). */
+    private fun listSafChildren(treeUri: Uri, parentDocumentId: String): List<SafEntry> {
+        val childrenUri = DocumentsContract.buildChildDocumentsUriUsingTree(treeUri, parentDocumentId)
+        val projection = arrayOf(
+            DocumentsContract.Document.COLUMN_DOCUMENT_ID,
+            DocumentsContract.Document.COLUMN_DISPLAY_NAME,
+            DocumentsContract.Document.COLUMN_MIME_TYPE,
+            DocumentsContract.Document.COLUMN_SIZE
+        )
+        val out = ArrayList<SafEntry>()
+        runCatching {
+            context.contentResolver.query(childrenUri, projection, null, null, null)?.use { c ->
+                while (c.moveToNext()) {
+                    val id = c.getString(0) ?: continue
+                    out.add(
+                        SafEntry(
+                            documentId = id,
+                            name = c.getString(1).orEmpty(),
+                            mimeType = c.getString(2).orEmpty(),
+                            size = if (c.isNull(3)) 0L else c.getLong(3),
+                            uri = DocumentsContract.buildDocumentUriUsingTree(treeUri, id)
+                        )
+                    )
+                }
+            }
+        }.onFailure { Log.w(TAG, "Cannot list folder $parentDocumentId", it) }
+        return out
+    }
+
+    /**
+     * Scans the picked folder AND every subfolder (any depth). Each file is imported on its own,
+     * so one unreadable file never stops the rest of the scan.
+     */
     private suspend fun scanSafDirectoryTree(treeUriString: String): FolderScanSummary {
         val treeUri = Uri.parse(treeUriString)
-        val rootDoc = DocumentFile.fromTreeUri(context, treeUri)
-            ?: throw IllegalArgumentException("Cannot access SAF directory: $treeUriString")
+        val rootId = runCatching { DocumentsContract.getTreeDocumentId(treeUri) }.getOrNull()
+            ?: throw IllegalArgumentException("Cannot access this folder")
 
         var scannedFiles = 0
         var importedEbooks = 0
         var importedAudiobooks = 0
+        _scanProgress.value = "Scanning…"
 
-        suspend fun traverseDirectory(dir: DocumentFile) {
-            val children = dir.listFiles()
-            val audioChildren = children.filter { file ->
-                file.isFile && isSupportedAudioExtension(file.name.orEmpty())
-            }
+        val pending = ArrayDeque<Pair<String, Uri>>()
+        pending.add(rootId to DocumentsContract.buildDocumentUriUsingTree(treeUri, rootId))
+        try {
+            while (pending.isNotEmpty()) {
+                val (dirId, dirUri) = pending.removeFirst()
+                val children = listSafChildren(treeUri, dirId)
+                    .filterNot { it.name.startsWith(".") }
+                    .sortedBy { it.name.lowercase() }
 
-            // If a subfolder contains multiple MP3/M4A/FLAC files, import as a unified multi-file Audiobook
-            if (dir != rootDoc && audioChildren.size >= 2) {
-                scannedFiles += audioChildren.size
-                importMultiFileAudiobookDirectory(dir, audioChildren, treeUriString)
-                importedAudiobooks++
-                return
-            }
+                children.filter { it.isDirectory }.forEach { pending.add(it.documentId to it.uri) }
 
-            for (child in children) {
-                if (child.isDirectory) {
-                    traverseDirectory(child)
-                } else if (child.isFile) {
-                    val name = child.name ?: continue
+                val files = children.filterNot { it.isDirectory }
+                val audioFiles = files.filter { isSupportedAudioExtension(it.name) }
+
+                // A subfolder with several audio files is one multi-file audiobook
+                val audioHandledAsFolder = dirId != rootId && audioFiles.size >= 2
+                if (audioHandledAsFolder) {
+                    scannedFiles += audioFiles.size
+                    runCatching {
+                        val dirDoc = DocumentFile.fromTreeUri(context, dirUri)
+                            ?: throw IllegalStateException("Cannot open audiobook folder")
+                        val docs = audioFiles.mapNotNull { DocumentFile.fromSingleUri(context, it.uri) }
+                        importMultiFileAudiobookDirectory(dirDoc, docs, treeUriString)
+                        importedAudiobooks++
+                    }.onFailure { Log.w(TAG, "Skipping audiobook folder ${dirUri}", it) }
+                }
+
+                for (file in files) {
+                    if (audioHandledAsFolder && isSupportedAudioExtension(file.name)) continue
+                    val ext = file.name.substringAfterLast('.', "").lowercase()
+                    if (ext !in SUPPORTED_EXTENSIONS) continue
                     scannedFiles++
-                    val imported = importSingleFile(
-                        fileUri = child.uri.toString(),
-                        fileName = name,
-                        fileSizeBytes = child.length(),
-                        parentFolderUri = dir.uri.toString()
-                    )
+                    _scanProgress.value = "Scanning… $scannedFiles found · ${file.name}"
+                    val imported = runCatching {
+                        importSingleFile(
+                            fileUri = file.uri.toString(),
+                            fileName = file.name,
+                            fileSizeBytes = file.size,
+                            parentFolderUri = dirUri.toString()
+                        )
+                    }.onFailure { Log.w(TAG, "Skipping unreadable file ${file.name}", it) }.getOrNull()
                     if (imported != null) {
-                        if (imported.mediaType == MediaType.AUDIOBOOK) {
-                            importedAudiobooks++
-                        } else {
-                            importedEbooks++
-                        }
+                        if (imported.mediaType == MediaType.AUDIOBOOK) importedAudiobooks++ else importedEbooks++
                     }
                 }
             }
+        } finally {
+            _scanProgress.value = null
         }
-
-        traverseDirectory(rootDoc)
         return FolderScanSummary(
             scannedFilesCount = scannedFiles,
             importedEbooksCount = importedEbooks,
@@ -210,23 +265,48 @@ class LibraryScannerService @Inject constructor(
                 totalChapters = 1,
                 totalDurationMs = audioMeta.durationMs
             )
-            bookDao.upsertBook(book)
-            audioTrackDao.upsertTrack(
-                AudioTrackEntity(
-                    id = "${bookId}_track_0",
-                    bookId = bookId,
-                    trackIndex = 0,
-                    title = audioMeta.title,
-                    fileUri = fileUri,
-                    mimeType = format.mimeType,
-                    durationMs = audioMeta.durationMs,
-                    startOffsetInBookMs = 0L,
-                    fileSizeBytes = fileSizeBytes,
-                    waveformPeaks = generateDefaultWaveform(bookId.hashCode())
-                )
+            val track = AudioTrackEntity(
+                id = "${bookId}_track_0",
+                bookId = bookId,
+                trackIndex = 0,
+                title = audioMeta.title,
+                fileUri = fileUri,
+                mimeType = format.mimeType,
+                durationMs = audioMeta.durationMs,
+                startOffsetInBookMs = 0L,
+                fileSizeBytes = fileSizeBytes,
+                waveformPeaks = generateDefaultWaveform(bookId.hashCode())
             )
-            book
+            // Chapter markers stored inside the file (.m4b / .m4a)
+            val chapters = com.example.data.audio.EmbeddedChapterReader.chaptersForTracks(context, bookId, listOf(track))
+            val withChapters = book.copy(totalChapters = chapters.size.coerceAtLeast(1))
+            bookDao.upsertBook(withChapters)
+            audioTrackDao.upsertTrack(track)
+            if (chapters.isNotEmpty()) chapterDao.upsertChapters(chapters)
+            withChapters
         } else {
+            if (format == BookFormat.PDF) {
+                // PDFs: no full-text parse at import (that happens when the book is opened) – just page count
+                val pages = runCatching {
+                    context.contentResolver.openFileDescriptor(Uri.parse(fileUri), "r")
+                        ?.use { pfd -> PdfRenderer(pfd).use { it.pageCount } } ?: 0
+                }.getOrDefault(0)
+                val pdfBook = BookEntity(
+                    id = bookId,
+                    title = rawTitle,
+                    author = "Unknown Author",
+                    format = format,
+                    mediaType = MediaType.EBOOK,
+                    fileUri = fileUri,
+                    parentFolderUri = parentFolderUri,
+                    coverImagePath = extractEbookCoverImage(fileUri, bookId, format),
+                    fileSizeBytes = fileSizeBytes,
+                    totalChapters = pages,
+                    totalPages = pages
+                )
+                bookDao.upsertBook(pdfBook)
+                return pdfBook
+            }
             val coverPath = extractEbookCoverImage(fileUri, bookId, format)
             val draftBook = BookEntity(
                 id = bookId,
@@ -258,13 +338,56 @@ class LibraryScannerService @Inject constructor(
         }
     }
 
+    /**
+     * Imports a user-picked folder as ONE audiobook (multi-file audiobook folders such as
+     * "01.mp3, 02.mp3, ..." are played back-to-back as a single book).
+     */
+    suspend fun importAudiobookFolder(treeUriString: String): Result<BookEntity> =
+        withContext(ioDispatcher) {
+            runCatching {
+                val treeUri = Uri.parse(treeUriString)
+                runCatching {
+                    persistAccess(treeUri)
+                }
+                val dir = DocumentFile.fromTreeUri(context, treeUri)
+                    ?: throw IllegalArgumentException("Cannot open the selected folder")
+                val audioFiles = dir.listFiles().filter { file ->
+                    file.isFile && isSupportedAudioExtension(file.name.orEmpty())
+                }
+                when {
+                    audioFiles.isEmpty() ->
+                        throw IllegalArgumentException("No audio files (.m4b/.mp3/.m4a/.flac/.ogg/.wav) in this folder")
+                    audioFiles.size == 1 -> {
+                        val only = audioFiles.first()
+                        importSingleFile(
+                            fileUri = only.uri.toString(),
+                            fileName = only.name.orEmpty(),
+                            fileSizeBytes = only.length(),
+                            parentFolderUri = dir.uri.toString()
+                        ) ?: throw IllegalArgumentException("Unsupported audio file: ${only.name}")
+                    }
+                    else -> importMultiFileAudiobookDirectory(dir, audioFiles, treeUriString)
+                }
+            }
+        }
+
+    /** Deletes covers / generated audio that belonged to the given (already removed) books. */
+    suspend fun deleteGeneratedFilesForBooks(bookIds: List<String>) = withContext(ioDispatcher) {
+        bookIds.forEach { id ->
+            runCatching { File(context.filesDir, "audiobooks/$id").deleteRecursively() }
+            runCatching {
+                coversDir.listFiles()?.filter { it.name.startsWith("${id}_") }?.forEach { it.delete() }
+            }
+        }
+    }
+
     private suspend fun importMultiFileAudiobookDirectory(
         dir: DocumentFile,
         audioFiles: List<DocumentFile>,
         rootWatchedUri: String
-    ) {
+    ): BookEntity {
         val folderUriStr = dir.uri.toString()
-        if (bookDao.getBookByUri(folderUriStr) != null) return
+        bookDao.getBookByUri(folderUriStr)?.let { return it }
 
         val bookId = "audiobook_folder_${folderUriStr.hashCode() and 0x7FFFFFFF}"
         val sortedFiles = audioFiles.sortedBy { it.name.orEmpty() }
@@ -278,7 +401,7 @@ class LibraryScannerService @Inject constructor(
         val tracks = sortedFiles.mapIndexed { idx, docFile ->
             val trackName = docFile.name?.substringBeforeLast('.') ?: "Track ${idx + 1}"
             val itemMeta = extractSingleAudioFileMetadata(docFile.uri.toString(), bookId, trackName)
-            val dur = itemMeta.durationMs.coerceAtLeast(30_000L)
+            val dur = itemMeta.durationMs.coerceAtLeast(1_000L)
             val track = AudioTrackEntity(
                 id = "${bookId}_track_$idx",
                 bookId = bookId,
@@ -311,6 +434,7 @@ class LibraryScannerService @Inject constructor(
         )
         bookDao.upsertBook(folderBook)
         audioTrackDao.upsertTracks(tracks)
+        return folderBook
     }
 
     private data class ExtractedAudioMeta(
@@ -354,6 +478,111 @@ class LibraryScannerService @Inject constructor(
         }
     }
 
+    /**
+     * Fills in covers for books imported before cover extraction worked (or whose cover file
+     * was cleared). Runs once per launch; cheap when every book already has a cover.
+     */
+    suspend fun backfillMissingCovers() = withContext(ioDispatcher) {
+        val books = bookDao.observeAllBooks().firstOrNull().orEmpty()
+        for (book in books) {
+            val existing = book.coverImagePath
+            if (existing != null && File(existing).isFile) continue
+            val cover = runCatching {
+                when {
+                    !book.format.isAudioFormat && book.format != BookFormat.AUDIO_FOLDER ->
+                        extractEbookCoverImage(book.fileUri, book.id, book.format)
+                    book.format == BookFormat.AUDIO_FOLDER -> {
+                        val tracks = audioTrackDao.getTracksForBook(book.id)
+                        tracks.firstOrNull()?.let { extractSingleAudioFileMetadata(it.fileUri, book.id, book.title).coverPath }
+                    }
+                    else -> extractSingleAudioFileMetadata(book.fileUri, book.id, book.title).coverPath
+                }
+            }.getOrNull()
+            if (cover != null) bookDao.updateBook(book.copy(coverImagePath = cover))
+        }
+    }
+
+    private fun saveCoverBytes(bookId: String, bytes: ByteArray): String? {
+        if (bytes.size < 64) return null
+        // Validate it decodes, and downscale very large covers to keep the grid fast
+        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
+        if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return null
+        val outFile = File(coversDir, "${bookId}_cover.jpg")
+        if (bounds.outHeight > 1200) {
+            val sample = Integer.highestOneBit((bounds.outHeight / 900).coerceAtLeast(1))
+            val bmp = BitmapFactory.decodeByteArray(bytes, 0, bytes.size, BitmapFactory.Options().apply { inSampleSize = sample })
+                ?: return null
+            FileOutputStream(outFile).use { bmp.compress(Bitmap.CompressFormat.JPEG, 88, it) }
+            bmp.recycle()
+        } else {
+            outFile.writeBytes(bytes)
+        }
+        return outFile.absolutePath
+    }
+
+    /** Keeps read AND write access to a picked file/folder (write is needed to delete files later). */
+    private fun persistAccess(uri: Uri) {
+        val rw = Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+        runCatching { context.contentResolver.takePersistableUriPermission(uri, rw) }
+            .recoverCatching { context.contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION) }
+    }
+
+    /**
+     * Permanently deletes the book's file from the phone (for a multi-file audiobook, its folder).
+     * Throws with a readable message when Android doesn't allow it.
+     */
+    suspend fun deleteBookFile(book: BookEntity): Unit = withContext(ioDispatcher) {
+        val uri = Uri.parse(book.fileUri)
+        when (uri.scheme) {
+            "file" -> {
+                val f = File(uri.path.orEmpty())
+                if (f.exists() && !f.deleteRecursively()) throw IllegalStateException("Couldn't delete ${f.name}")
+            }
+            "content" -> {
+                val deleted = try {
+                    DocumentsContract.deleteDocument(context.contentResolver, uri)
+                } catch (e: SecurityException) {
+                    throw IllegalStateException(
+                        "OmniRead isn't allowed to delete this file. Re-add its folder from Folders & files " +
+                            "(new folders allow deleting), or delete it in the Files app."
+                    )
+                } catch (e: java.io.FileNotFoundException) {
+                    true // already gone
+                }
+                if (!deleted) throw IllegalStateException("Android refused to delete the file")
+            }
+            else -> throw IllegalStateException("This book has no file that can be deleted")
+        }
+        runCatching { coversDir.listFiles()?.filter { it.name.startsWith("${book.id}_") }?.forEach { it.delete() } }
+        Unit
+    }
+
+    /** Re-extracts the cover embedded in the book file (used by "Reset cover" in the editor). */
+    suspend fun extractCoverFromFile(book: BookEntity): String? = withContext(ioDispatcher) {
+        coversDir.listFiles()?.filter { it.name.startsWith("${book.id}_cover") }?.forEach { it.delete() }
+        if (book.format.isAudioFormat) extractSingleAudioFileMetadata(book.fileUri, book.id, book.title).coverPath
+        else extractEbookCoverImage(book.fileUri, book.id, book.format)
+    }
+
+    /** Copies a user-picked image to be the book's cover. Returns the stored path. */
+    suspend fun saveCustomCover(bookId: String, imageUri: String): String? = withContext(ioDispatcher) {
+        runCatching {
+            val bytes = context.contentResolver.openInputStream(Uri.parse(imageUri))?.use { it.readBytes() }
+                ?: return@runCatching null
+            coversDir.listFiles()?.filter { it.name.startsWith("${bookId}_cover") }?.forEach { it.delete() }
+            // New file name each time so image caches pick up the change
+            val out = File(coversDir, "${bookId}_cover_${System.currentTimeMillis()}.jpg")
+            val bmp = BitmapFactory.decodeByteArray(bytes, 0, bytes.size) ?: return@runCatching null
+            val scale = (1200f / bmp.height).coerceAtMost(1f)
+            val scaled = if (scale < 1f) {
+                Bitmap.createScaledBitmap(bmp, (bmp.width * scale).toInt(), (bmp.height * scale).toInt(), true)
+            } else bmp
+            FileOutputStream(out).use { scaled.compress(Bitmap.CompressFormat.JPEG, 90, it) }
+            out.absolutePath
+        }.getOrNull()
+    }
+
     private fun extractEbookCoverImage(
         fileUri: String,
         bookId: String,
@@ -367,30 +596,66 @@ class LibraryScannerService @Inject constructor(
                     try {
                         context.contentResolver.openInputStream(uri)?.use { input ->
                             FileOutputStream(tempZip).use { output -> input.copyTo(output) }
-                        }
+                        } ?: return@runCatching null
                         ZipFile(tempZip).use { zip ->
-                            val imageEntry = zip.entries().asSequence().firstOrNull { entry ->
-                                val lower = entry.name.lowercase()
-                                !entry.isDirectory &&
-                                    (lower.endsWith(".jpg") || lower.endsWith(".jpeg") || lower.endsWith(".png") || lower.endsWith(".webp")) &&
-                                    (lower.contains("cover") || format == BookFormat.CBZ)
-                            } ?: zip.entries().asSequence().firstOrNull { entry ->
-                                val lower = entry.name.lowercase()
-                                !entry.isDirectory && (lower.endsWith(".jpg") || lower.endsWith(".jpeg") || lower.endsWith(".png"))
+                            val entries = zip.entries().asSequence().filter { !it.isDirectory }.toList()
+                            fun isImage(name: String) = name.lowercase().let {
+                                it.endsWith(".jpg") || it.endsWith(".jpeg") || it.endsWith(".png") ||
+                                    it.endsWith(".webp") || it.endsWith(".gif")
                             }
 
-                            if (imageEntry != null) {
-                                val outFile = File(coversDir, "${bookId}_cover.jpg")
-                                zip.getInputStream(imageEntry).use { imgIn ->
-                                    FileOutputStream(outFile).use { imgOut -> imgIn.copyTo(imgOut) }
+                            // 1. The cover declared in the EPUB package (EPUB3 cover-image / EPUB2 meta name="cover")
+                            val declared: String? = if (format == BookFormat.EPUB) runCatching {
+                                val container = zip.getEntry("META-INF/container.xml") ?: return@runCatching null
+                                val opfPath = Jsoup.parse(zip.getInputStream(container).bufferedReader().readText(), "", Parser.xmlParser())
+                                    .selectFirst("rootfile")?.attr("full-path") ?: return@runCatching null
+                                val opfEntry = zip.getEntry(opfPath) ?: return@runCatching null
+                                val opf = Jsoup.parse(zip.getInputStream(opfEntry).bufferedReader().readText(), "", Parser.xmlParser())
+                                val items = opf.select("manifest > item")
+                                val coverId = opf.select("meta").firstOrNull { it.attr("name") == "cover" }?.attr("content")
+                                val item = items.firstOrNull { it.attr("properties").split(' ').contains("cover-image") }
+                                    ?: items.firstOrNull { coverId != null && it.attr("id") == coverId }
+                                    ?: items.firstOrNull {
+                                        it.attr("media-type").startsWith("image/") && it.attr("id").contains("cover", true)
+                                    }
+                                val href = item?.attr("href") ?: return@runCatching null
+                                val opfDir = opfPath.substringBeforeLast('/', "")
+                                val decoded = java.net.URLDecoder.decode(href.replace("+", "%2B"), "UTF-8")
+                                val parts = ArrayList<String>()
+                                ("$opfDir/$decoded").split('/').forEach { seg ->
+                                    when (seg) {
+                                        "", "." -> Unit
+                                        ".." -> if (parts.isNotEmpty()) parts.removeAt(parts.size - 1)
+                                        else -> parts.add(seg)
+                                    }
                                 }
-                                return@runCatching outFile.absolutePath
-                            }
+                                parts.joinToString("/")
+                            }.getOrNull() else null
+
+                            val entry = declared?.let { zip.getEntry(it) }
+                                ?: entries.firstOrNull { isImage(it.name) && it.name.contains("cover", ignoreCase = true) }
+                                ?: if (format == BookFormat.CBZ) entries.filter { isImage(it.name) }.minByOrNull { it.name } else null
+                                ?: entries.filter { isImage(it.name) }.maxByOrNull { it.size }
+                            entry?.let { saveCoverBytes(bookId, zip.getInputStream(it).use { s -> s.readBytes() }) }
                         }
                     } finally {
                         tempZip.delete()
                     }
-                    null
+                }
+
+                BookFormat.MOBI, BookFormat.AZW3 -> {
+                    val bytes = context.contentResolver.openInputStream(uri)?.use { it.readBytes() } ?: return@runCatching null
+                    extractMobiCover(bytes)?.let { saveCoverBytes(bookId, it) }
+                }
+
+                BookFormat.FB2 -> {
+                    val xml = context.contentResolver.openInputStream(uri)?.use { it.readBytes() }
+                        ?.toString(Charsets.UTF_8) ?: return@runCatching null
+                    val doc = Jsoup.parse(xml, "", Parser.xmlParser())
+                    val href = doc.selectFirst("coverpage image")?.attributes()?.firstOrNull { it.key.endsWith("href") }
+                        ?.value?.removePrefix("#") ?: return@runCatching null
+                    val b64 = doc.select("binary").firstOrNull { it.attr("id") == href }?.text() ?: return@runCatching null
+                    saveCoverBytes(bookId, android.util.Base64.decode(b64, android.util.Base64.DEFAULT))
                 }
 
                 BookFormat.PDF -> {
@@ -398,16 +663,16 @@ class LibraryScannerService @Inject constructor(
                         PdfRenderer(pfd).use { renderer ->
                             if (renderer.pageCount > 0) {
                                 renderer.openPage(0).use { page ->
+                                    val scale = (600f / page.width.coerceAtLeast(1)).coerceAtMost(2f)
                                     val bmp = Bitmap.createBitmap(
-                                        max(1, page.width),
-                                        max(1, page.height),
+                                        max(1, (page.width * scale).toInt()),
+                                        max(1, (page.height * scale).toInt()),
                                         Bitmap.Config.ARGB_8888
                                     )
+                                    bmp.eraseColor(android.graphics.Color.WHITE)
                                     page.render(bmp, null, null, PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY)
-                                    val outFile = File(coversDir, "${bookId}_cover.png")
-                                    FileOutputStream(outFile).use { out ->
-                                        bmp.compress(Bitmap.CompressFormat.PNG, 85, out)
-                                    }
+                                    val outFile = File(coversDir, "${bookId}_cover.jpg")
+                                    FileOutputStream(outFile).use { out -> bmp.compress(Bitmap.CompressFormat.JPEG, 88, out) }
                                     bmp.recycle()
                                     return@runCatching outFile.absolutePath
                                 }
@@ -422,6 +687,42 @@ class LibraryScannerService @Inject constructor(
         }.getOrNull()
     }
 
+    /** Reads the cover image record of a MOBI/AZW3 file via the EXTH 201 (cover offset) record. */
+    private fun extractMobiCover(bytes: ByteArray): ByteArray? {
+        if (bytes.size < 78) return null
+        val buf = java.nio.ByteBuffer.wrap(bytes).order(java.nio.ByteOrder.BIG_ENDIAN)
+        val numRecords = buf.getShort(76).toInt() and 0xFFFF
+        if (numRecords < 2 || 78 + numRecords * 8 > bytes.size) return null
+        val offsets = IntArray(numRecords) { buf.getInt(78 + it * 8) }
+        val rec0 = offsets[0]
+        val mobi = rec0 + 16
+        if (mobi + 0x84 > bytes.size || String(bytes, mobi, 4, Charsets.US_ASCII) != "MOBI") return null
+        val headerLength = buf.getInt(mobi + 4)
+        val firstImageIndex = buf.getInt(mobi + 0x5C)
+        val exthFlags = buf.getInt(mobi + 0x70)
+        if (exthFlags and 0x40 == 0 || firstImageIndex <= 0) return null
+        val exth = mobi + headerLength
+        if (exth + 12 > bytes.size || String(bytes, exth, 4, Charsets.US_ASCII) != "EXTH") return null
+        val count = buf.getInt(exth + 8)
+        var pos = exth + 12
+        var coverOffset = -1
+        var thumbOffset = -1
+        repeat(count) {
+            if (pos + 8 > bytes.size) return@repeat
+            val type = buf.getInt(pos)
+            val len = buf.getInt(pos + 4)
+            if (len < 8) return null
+            if (type == 201 && len >= 12) coverOffset = buf.getInt(pos + 8)
+            if (type == 202 && len >= 12) thumbOffset = buf.getInt(pos + 8)
+            pos += len
+        }
+        val idx = firstImageIndex + (if (coverOffset >= 0) coverOffset else thumbOffset.takeIf { it >= 0 } ?: return null)
+        if (idx !in 0 until numRecords) return null
+        val end = if (idx + 1 < numRecords) offsets[idx + 1] else bytes.size
+        if (offsets[idx] !in 0 until end || end > bytes.size) return null
+        return bytes.copyOfRange(offsets[idx], end)
+    }
+
     private fun isSupportedAudioExtension(fileName: String): Boolean {
         val ext = fileName.substringAfterLast('.', "").lowercase()
         return ext in setOf("m4b", "mp3", "m4a", "flac", "ogg", "wav")
@@ -434,6 +735,7 @@ class LibraryScannerService @Inject constructor(
     }
 
     companion object {
+        private const val TAG = "LibraryScanner"
         private val KEY_WATCHED_FOLDER_URIS = stringSetPreferencesKey("omniread_watched_folder_uris")
 
         val SUPPORTED_EXTENSIONS = setOf(

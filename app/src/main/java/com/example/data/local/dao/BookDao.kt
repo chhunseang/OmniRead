@@ -46,6 +46,9 @@ interface BookDao {
     @Query("SELECT * FROM books WHERE id = :bookId LIMIT 1")
     suspend fun getBookById(bookId: String): BookEntity?
 
+    @Query("SELECT * FROM books")
+    suspend fun getAllBooksOnce(): List<BookEntity>
+
     @Query("SELECT * FROM books WHERE file_uri = :fileUri LIMIT 1")
     suspend fun getBookByUri(fileUri: String): BookEntity?
 
@@ -133,6 +136,19 @@ interface BookDao {
         audiobookUri: String,
         sidecarPath: String?
     )
+
+    /**
+     * Earlier builds turned an ebook into a "hybrid" entry once the Studio narrated it, which
+     * made the ebook show up in Listen as if it were audio. Books stay books now.
+     */
+    @Query(
+        """
+        UPDATE books
+        SET media_type = 'EBOOK', synced_audiobook_uri = NULL, synced_sidecar_path = NULL
+        WHERE media_type = 'HYBRID_SYNCED'
+        """
+    )
+    suspend fun revertHybridBooksToEbooks()
 
     @Delete
     suspend fun deleteBook(book: BookEntity)

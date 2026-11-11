@@ -15,13 +15,16 @@ android {
   compileSdk { version = release(36) { minorApiLevel = 1 } }
 
   defaultConfig {
-    applicationId = "com.aistudio.omniread.kxpqzr"
+    applicationId = "io.github.chhunseang.omniread"
     minSdk = 24
     targetSdk = 36
     versionCode = 1
-    versionName = "1.0"
+    versionName = "0.0.1-alpha"
 
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+
+    // Modern phones (incl. Pixel 6) are arm64; keeps the sherpa-onnx native libs small.
+    ndk { abiFilters += listOf("arm64-v8a") }
   }
 
   // Do not remove or modify these signingConfigs. They are necessary for building, installing,
@@ -128,8 +131,9 @@ dependencies {
   implementation(libs.readium.streamer)
   implementation(libs.readium.navigator)
 
-  // ONNX Runtime Mobile (Sherpa-ONNX / Kokoro-82M Local Inference)
-  implementation(libs.onnxruntime.android)
+  // sherpa-onnx (official Android AAR, arm64-v8a) for on-device Kokoro-82M TTS
+  implementation(files("libs/sherpa-onnx-2.0.1.aar"))
+  implementation("org.apache.commons:commons-compress:1.27.1")
 
   // Networking, Serialization & Parsing
   implementation(libs.coil.compose)
