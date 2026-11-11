@@ -1,13 +1,9 @@
-import com.google.gms.googleservices.GoogleServicesPlugin.MissingGoogleServicesStrategy
-
 plugins {
   alias(libs.plugins.android.application)
   alias(libs.plugins.kotlin.compose)
   alias(libs.plugins.kotlin.serialization)
   alias(libs.plugins.google.devtools.ksp)
   alias(libs.plugins.hilt.android)
-  alias(libs.plugins.secrets)
-  alias(libs.plugins.google.services)
 }
 
 android {
@@ -18,8 +14,8 @@ android {
     applicationId = "io.github.chhunseang.omniread"
     minSdk = 24
     targetSdk = 36
-    versionCode = 1
-    versionName = "0.0.1-alpha"
+    versionCode = 2
+    versionName = "0.0.2-alpha"
 
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
@@ -27,21 +23,29 @@ android {
     ndk { abiFilters += listOf("arm64-v8a") }
   }
 
-  // Do not remove or modify these signingConfigs. They are necessary for building, installing,
-  // and updating Android apps in AI Studio.
+  // Release builds are signed only when a keystore is supplied through the environment
+  // (KEYSTORE_PATH / STORE_PASSWORD / KEY_PASSWORD, alias "upload"). Without it the release APK
+  // is left unsigned, which is what F-Droid's build server expects (it signs with its own key).
+  val releaseKeystore = System.getenv("KEYSTORE_PATH")?.let { file(it) }?.takeIf { it.isFile }
+  // A local debug.keystore (git-ignored) keeps debug builds updatable on a test phone;
+  // fresh clones fall back to the Android SDK's default debug key.
+  val localDebugKeystore = file("${rootDir}/debug.keystore").takeIf { it.isFile }
   signingConfigs {
-    create("release") {
-      val keystorePath = System.getenv("KEYSTORE_PATH") ?: "${rootDir}/my-upload-key.jks"
-      storeFile = file(keystorePath)
-      storePassword = System.getenv("STORE_PASSWORD")
-      keyAlias = "upload"
-      keyPassword = System.getenv("KEY_PASSWORD")
+    if (releaseKeystore != null) {
+      create("release") {
+        storeFile = releaseKeystore
+        storePassword = System.getenv("STORE_PASSWORD")
+        keyAlias = "upload"
+        keyPassword = System.getenv("KEY_PASSWORD")
+      }
     }
-    create("debugConfig") {
-      storeFile = file("${rootDir}/debug.keystore")
-      storePassword = "android"
-      keyAlias = "androiddebugkey"
-      keyPassword = "android"
+    if (localDebugKeystore != null) {
+      create("localDebug") {
+        storeFile = localDebugKeystore
+        storePassword = "android"
+        keyAlias = "androiddebugkey"
+        keyPassword = "android"
+      }
     }
   }
 
@@ -50,14 +54,10 @@ android {
       isCrunchPngs = false
       isMinifyEnabled = false
       proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
-      // Do not remove or modify this signingConfig assignment. It is necessary for Android apps in
-      // AI Studio.
-      signingConfig = signingConfigs.getByName("release")
+      signingConfig = signingConfigs.findByName("release")
     }
     debug {
-      // Do not remove or modify this signingConfig assignment. It is necessary for Android apps in
-      // AI Studio.
-      signingConfig = signingConfigs.getByName("debugConfig")
+      signingConfigs.findByName("localDebug")?.let { signingConfig = it }
     }
   }
   compileOptions {
@@ -70,21 +70,12 @@ android {
     buildConfig = true
   }
   testOptions { unitTests { isIncludeAndroidResources = true } }
+  // No encrypted Google dependency metadata in the APK or bundle (required by F-Droid)
   dependenciesInfo {
     includeInApk = false
-    includeInBundle = true
+    includeInBundle = false
   }
 }
-
-// Configure the Secrets Gradle Plugin to use .env and .env.example files
-// to match the convention used in Web projects.
-secrets {
-  propertiesFileName = ".env"
-  defaultPropertiesFileName = ".env.example"
-  ignoreList.add("FIREBASE_APPCHECK_DEBUG_TOKEN")
-}
-
-googleServices { missingGoogleServicesStrategy = MissingGoogleServicesStrategy.WARN }
 
 dependencies {
   coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.4")
@@ -131,8 +122,8 @@ dependencies {
   implementation(libs.readium.streamer)
   implementation(libs.readium.navigator)
 
-  // sherpa-onnx (official Android AAR, arm64-v8a) for on-device Kokoro-82M TTS
-  implementation(files("libs/sherpa-onnx-2.0.1.aar"))
+  // sherpa-onnx (on-device Kokoro-82M TTS), published on JitPack
+  implementation("com.github.k2-fsa.sherpa-onnx:sherpa-onnx:v2.0.1@aar")
   implementation("org.apache.commons:commons-compress:1.27.1")
 
   // Networking, Serialization & Parsing

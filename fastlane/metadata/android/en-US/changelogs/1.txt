@@ -1,0 +1,1 @@
+First public alpha: eBook reader with publisher styles and images, audiobook player with embedded chapters, and an on-device Kokoro narration studio.

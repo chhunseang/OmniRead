@@ -4,6 +4,20 @@ All notable changes to OmniRead are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [0.0.2-alpha] - 2026-11-11
+
+Build and packaging changes for F-Droid; no app behaviour changes.
+
+### Changed
+- sherpa-onnx comes from JitPack instead of a bundled `.aar`.
+- Release builds are unsigned unless a signing key is supplied through the environment.
+- Fresh clones can build debug APKs without a local debug keystore.
+- Added F-Droid / fastlane store listing (`fastlane/metadata/android/en-US`).
+
+### Removed
+- Unused Google Services, Secrets and Firebase build configuration left over from the project template.
+- Gradle's foojay JDK auto-download.
+
 ## [0.0.1-alpha] - 2026-11-11
 
 The first public alpha.
@@ -42,4 +56,5 @@ The first public alpha.
 - The Studio job list is not kept across app restarts (finished audiobooks are).
 - PDF support is basic.
 
+[0.0.2-alpha]: https://github.com/chhunseang/OmniRead/compare/v0.0.1-alpha...v0.0.2-alpha
 [0.0.1-alpha]: https://github.com/chhunseang/OmniRead/releases/tag/v0.0.1-alpha

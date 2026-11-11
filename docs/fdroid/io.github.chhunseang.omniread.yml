@@ -1,0 +1,32 @@
+Categories:
+  - Ebook Reader
+  - Audiobook
+  - Text to Speech
+License: GPL-3.0-or-later
+AuthorName: Chhunseang
+SourceCode: https://github.com/chhunseang/OmniRead
+IssueTracker: https://github.com/chhunseang/OmniRead/issues
+Changelog: https://github.com/chhunseang/OmniRead/blob/HEAD/CHANGELOG.md
+
+AutoName: OmniRead
+
+RepoType: git
+Repo: https://github.com/chhunseang/OmniRead.git
+
+AntiFeatures:
+  NonFreeNet:
+    en-US: Optional cloud voices (OpenAI, ElevenLabs, Gemini) send text to those services
+      when the user picks one and supplies their own API key.
+
+Builds:
+  - versionName: 0.0.2-alpha
+    versionCode: 2
+    commit: v0.0.2-alpha
+    subdir: app
+    gradle:
+      - yes
+
+AutoUpdateMode: Version
+UpdateCheckMode: Tags
+CurrentVersion: 0.0.2-alpha
+CurrentVersionCode: 2

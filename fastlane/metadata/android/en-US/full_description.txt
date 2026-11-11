@@ -1,0 +1,31 @@
+<p>OmniRead is an eBook reader, an audiobook player and a narration studio in one app. Read your books, listen to your audiobooks, and turn any book into an audiobook, all on your phone.</p>
+
+<p><b>Read</b></p>
+<ul>
+<li>EPUB as the publisher designed it: the book's own styles, embedded fonts and every illustration. MOBI/AZW3, FB2, TXT and PDF also open.</li>
+<li>Paged or continuous reading, per-side margins, typography controls, themes and paper textures.</li>
+<li>Pull past the end of a chapter to rubber-band into the next one; scrub pages live with a slider.</li>
+<li>Status line with battery, clock, chapter and page.</li>
+<li>Continue reading, reading-state filters and watched folders that import whole directories.</li>
+</ul>
+
+<p><b>Listen</b></p>
+<ul>
+<li>M4B, M4A and MP3 audiobooks, as single files or folders, with real chapter lists read from M4B/M4A files.</li>
+<li>Mini player and full Now Playing view, sleep timer with shake to extend, bookmarks with notes.</li>
+<li>Variable speed, skip silence, voice boost, rewind on resume and configurable skip intervals.</li>
+<li>Lock-screen, headset and car controls.</li>
+</ul>
+
+<p><b>Studio: make your own audiobooks</b></p>
+<ul>
+<li>Narrate any book on your phone with Kokoro-82M through sherpa-onnx: 53 voices, fully offline after a one-time voice download (about 130 MB).</li>
+<li>Pick the chapters ("story only" by default), the voice and the pace.</li>
+<li>Exports M4B or WAV with chapter markers and follow-along text.</li>
+<li>Runs in the background with progress and time left. Share, save or delete any narration.</li>
+</ul>
+
+<p><b>Privacy</b></p>
+<p>No account, no ads, no analytics. Your books stay on your phone. The app only goes online to download the Kokoro voices and, only if you choose one, to use a cloud voice (OpenAI, ElevenLabs or Gemini) with your own API key.</p>
+
+<p>OmniRead is alpha software. Bug reports are welcome on GitHub.</p>

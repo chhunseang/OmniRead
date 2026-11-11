@@ -12,13 +12,14 @@ pluginManagement {
   }
 }
 
-plugins { id("org.gradle.toolchains.foojay-resolver-convention") version "1.0.0" }
 
 dependencyResolutionManagement {
   repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
   repositories {
     google()
     mavenCentral()
+    // sherpa-onnx (on-device Kokoro TTS) is published to JitPack only
+    maven("https://jitpack.io") { content { includeGroup("com.github.k2-fsa.sherpa-onnx") } }
   }
 }
 

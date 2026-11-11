@@ -108,7 +108,7 @@ cd OmniRead
 
 The debug APK is written to `app/build/outputs/apk/debug/`.
 
-**Release builds** are signed with a keystore supplied through environment variables. Nothing secret lives in the repo:
+**Release builds** are signed only when a keystore is supplied through environment variables. Nothing secret lives in the repo:
 
 ```bash
 export KEYSTORE_PATH=/path/to/release.jks
@@ -117,7 +117,7 @@ export KEY_PASSWORD=...        # key alias: "upload"
 ./gradlew assembleRelease
 ```
 
-The sherpa-onnx Android library (`app/libs/sherpa-onnx-2.0.1.aar`) is vendored, because it isn't published to Maven Central.
+Without those variables, `assembleRelease` produces an unsigned APK, which is what F-Droid expects. Dependencies come from Google Maven, Maven Central and JitPack (sherpa-onnx only); there are no bundled binaries.
 
 ## Tech stack
 

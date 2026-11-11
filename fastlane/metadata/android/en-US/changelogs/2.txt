@@ -1,0 +1,6 @@
+F-Droid-ready build.
+
+- sherpa-onnx now comes from JitPack instead of a bundled binary
+- Removed unused Google/Firebase build plugins
+- Release builds are unsigned unless a key is supplied
+- Fresh clones build without a local debug keystore
